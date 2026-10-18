@@ -109,8 +109,9 @@ bash tests/run-root-shell-tests.sh
 
 Tests use fake superuser executables; no real root or Android device is needed.
 They cover direct command execution (without a separate UID probe), denial
-diagnostics, executable-path fallbacks, large output, exit codes, and timeouts
-without command replay. They also pin the `su` invocation contract: the suite
+diagnostics, executable-path fallbacks, large output, exit codes, timeouts
+without command replay, regex-free `pm list users` and active-user parsing,
+and error-line detection. They also pin the `su` invocation contract: the suite
 asserts that the modern `su -c <script>` protocol is used, that a `su` without
 `-c` support still works through the legacy stdin protocol, and that a `su`
 rejecting both fails fast instead of hanging. CI runs them before building the APK.

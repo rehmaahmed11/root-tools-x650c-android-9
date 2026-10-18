@@ -3,7 +3,9 @@ package com.example.usermanager;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Comparator;
+import java.util.List;
 import java.util.stream.Stream;
 
 /** Host-side regression tests: fake su, no device/root permission needed. */
@@ -162,6 +164,46 @@ public final class RootShellTest {
         result = new RootShell(new String[]{rejectOnly.toString()}).run("echo never", 3);
         check(!result.commandStarted && result.exitCode != 0 && (System.nanoTime() - start) < 5000000000L,
                 "a su that rejects -c and ignores stdin fails fast with a clear error: " + result.output);
+
+        // User-list parsing and current-user extraction (previously crashed on
+        // Android 9 with PatternSyntaxException from an unescaped `}` in regex).
+        String pmUsersOutput = "Users:\n"
+                + "\tUserInfo{0:Owner:13} running\n"
+                + "\tUserInfo{10:GuestUser:404}\n"
+                + "\tUserInfo{11:CustomProfile:10} running\n"
+                + "\tUserInfo{12::4}\n"
+                + "CURRENT_USER=0\n";
+        List<RootShell.DeviceUser> parsed = RootShell.parseUsers(pmUsersOutput);
+        check(parsed.size() == 4
+                        && parsed.get(0).id == 0 && "Owner".equals(parsed.get(0).name) && parsed.get(0).running && !parsed.get(0).guest
+                        && parsed.get(1).id == 10 && "GuestUser".equals(parsed.get(1).name) && !parsed.get(1).running && parsed.get(1).guest
+                        && parsed.get(2).id == 11 && "CustomProfile".equals(parsed.get(2).name) && parsed.get(2).running && !parsed.get(2).guest
+                        && parsed.get(3).id == 12 && "User 12".equals(parsed.get(3).name) && parsed.get(3).guest,
+                "pm list users output parses owner, GuestUser, flags and fallback names without regex");
+
+        check(RootShell.parseCurrentUser(pmUsersOutput, parsed) == 0,
+                "active user ID is extracted from combined pm/am output");
+        check(RootShell.parseCurrentUser("Users:\n\tUserInfo{0:Owner:13} running\n\tUserInfo{10:GuestUser:404} running\n",
+                RootShell.parseUsers("Users:\n\tUserInfo{0:Owner:13} running\n\tUserInfo{10:GuestUser:404} running\n")) == 10,
+                "active user falls back to running guest when am get-current-user is silent");
+
+        check(!RootShell.hasFailureLine("Success: created user id 10")
+                        && RootShell.hasFailureLine("Error: couldn't create User.")
+                        && RootShell.hasFailureLine("java.lang.SecurityException: Shell does not have permission"),
+                "command output error lines are detected without regex");
+
+        // Guardrail: Android's ICU regex engine throws PatternSyntaxException on
+        // unescaped braces that desktop OpenJDK accepts. Ensure app sources do
+        // not use java.util.regex at all.
+        Path mainSrc = Paths.get("app/src/main/java/com/example/usermanager/MainActivity.java");
+        Path shellSrc = Paths.get("app/src/main/java/com/example/usermanager/RootShell.java");
+        if (Files.exists(mainSrc) && Files.exists(shellSrc)) {
+            String mainCode = new String(Files.readAllBytes(mainSrc), StandardCharsets.UTF_8);
+            String shellCode = new String(Files.readAllBytes(shellSrc), StandardCharsets.UTF_8);
+            check(!mainCode.contains("Pattern.compile") && !shellCode.contains("Pattern.compile")
+                            && !mainCode.contains("pm remove-user --guest"),
+                    "app sources avoid Android-incompatible regexes and invalid pm remove-user flags");
+        }
 
         System.out.println(passed + " root-shell regression tests passed.");
     }
