@@ -12,13 +12,10 @@ import android.text.InputFilter;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.animation.AlphaAnimation;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -31,7 +28,7 @@ import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Root-gated Android multi-user controls. All privileged shell work is performed off the UI thread. */
+/** Android multi-user controls; requested shell operations run off the UI thread. */
 public class MainActivity extends Activity {
     private static final int INK = Color.rgb(29, 43, 37);
     private static final int MUTED = Color.rgb(112, 127, 119);
@@ -40,19 +37,17 @@ public class MainActivity extends Activity {
     private static final int CARD = Color.WHITE;
     private static final int LINE = Color.rgb(230, 237, 232);
     private final RootShell rootShell = new RootShell();
-    private boolean checkingRoot;
-    private boolean wasPaused;
     private boolean actionRunning;
+    private boolean loadingUsers;
+    private boolean usersLoaded;
+    private String usersLoadError;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final List<DeviceUser> users = new ArrayList<>();
     private FrameLayout host;
     private LinearLayout page;
-    private TextView rootBadge;
     private TextView homeUsersLabel;
-    private ProgressBar rootProgress;
-    private boolean rootReady;
     private boolean showingUsers;
     private int currentUser = -1;
 
@@ -61,54 +56,9 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-        rootReady = false; // A previous grant is not evidence of a live root shell.
+        // Open the interface immediately. The real user-list command is issued
+        // only when the user opens Guest controls, with no separate root preflight.
         renderHome();
-        retryRoot();
-    }
-
-    private void checkRootFirstTime() {
-        if (checkingRoot || isFinishing() || isDestroyed()) return;
-        checkingRoot = true;
-        rootReady = false;
-        Toast.makeText(this, "Requesting root access — approve Root Tools in your superuser prompt", Toast.LENGTH_LONG).show();
-        if (showingUsers) renderUsers(); else renderHome();
-        updateRootBadge("CHECKING ROOT", false, true);
-        worker.execute(() -> {
-            RootShell.Result result = runRoot("id", 60);
-            boolean ok = result.exitCode == 0 && result.rootVerified && !result.timedOut;
-            main.post(() -> {
-                if (isFinishing() || isDestroyed()) return;
-                checkingRoot = false;
-                rootReady = ok;
-                if (!ok) { users.clear(); currentUser = -1; }
-                if (showingUsers) renderUsers(); else renderHome();
-                if (ok) {
-                    showRootPass();
-                    refreshUsers(false);
-                } else {
-                    updateRootBadge(result.timedOut ? "ROOT TIMEOUT" : "ROOT NEEDED", false, false);
-                    showError("Root access unavailable", cleanError(result.output)
-                            + "\n\nIn your root manager, check access for Root Tools (com.example.usermanager), then return here or tap Check root. Allowing permission cannot root an unrooted device.");
-                }
-            });
-        });
-    }
-
-    private void retryRoot() {
-        checkRootFirstTime();
-    }
-
-    @Override protected void onPause() {
-        super.onPause();
-        wasPaused = true;
-    }
-
-    @Override protected void onResume() {
-        super.onResume();
-        if (wasPaused) {
-            wasPaused = false;
-            retryRoot();
-        }
     }
 
     private void renderHome() {
@@ -116,37 +66,21 @@ public class MainActivity extends Activity {
         buildPage();
         addToolbar();
         addSpacer(34);
-        addLabel(rootReady ? "ROOTED AND READY" : "ROOT ACCESS REQUIRED", 11, GREEN, true, 2);
+        addLabel("DEVICE USERS", 11, GREEN, true, 2);
         addText("Your device,\nyour space.", 34, INK, true, 0);
-        addText("A simple home for powerful Android tools.", 15, MUTED, false, 12);
+        addText("A simple home for managing Android profiles.", 15, MUTED, false, 12);
 
         LinearLayout hero = card(22);
         hero.setBackground(roundDrawable(Color.rgb(27, 57, 45), 24));
         hero.setPadding(dp(22), dp(20), dp(22), dp(20));
-        TextView heroOver = text("ROOT ACCESS", 11, Color.rgb(176, 224, 198), true);
+        TextView heroOver = text("MULTI-USER TOOLS", 11, Color.rgb(176, 224, 198), true);
         hero.addView(heroOver);
-        TextView heroTitle = text(rootReady ? "Root is ready" : "Unlock root tools", 21, Color.WHITE, true);
+        TextView heroTitle = text("Manage your profiles", 21, Color.WHITE, true);
         LinearLayout.LayoutParams htp = params(-1, -2); htp.topMargin = dp(8); hero.addView(heroTitle, htp);
-        TextView heroInfo = text(rootReady
-                ? "Superuser permission is available for this session."
-                : "Allow Root Tools in your root manager. We verify a real root shell before enabling tools (up to 60 seconds).",
+        TextView heroInfo = text("Create a GuestUser profile, switch between users, and manage device accounts.",
                 14, Color.rgb(211, 226, 217), false);
         heroInfo.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams hip = params(-1, -2); hip.topMargin = dp(6); hero.addView(heroInfo, hip);
-        LinearLayout status = new LinearLayout(this); status.setGravity(Gravity.CENTER_VERTICAL);
-        if (rootProgress != null && rootProgress.getParent() != null) ((ViewGroup) rootProgress.getParent()).removeView(rootProgress);
-        rootProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
-        rootProgress.setIndeterminate(true); rootProgress.setVisibility(checkingRoot ? View.VISIBLE : View.GONE);
-        LinearLayout.LayoutParams rp = params(18, 18); rp.topMargin = dp(17); status.addView(rootProgress, rp);
-        TextView inlineStatus = text(rootReady ? "Superuser enabled" : checkingRoot ? "Waiting for superuser response" : "Root not verified — tap Check root", 12,
-                Color.rgb(212, 231, 218), true);
-        LinearLayout.LayoutParams isp = params(-2, -2); isp.leftMargin = dp(9); isp.topMargin = dp(17); status.addView(inlineStatus, isp);
-        hero.addView(status);
-        if (!rootReady) {
-            Button check = button("Check root", true);
-            LinearLayout.LayoutParams cp = params(-1, 48); cp.topMargin = dp(18); hero.addView(check, cp);
-            check.setOnClickListener(v -> retryRoot());
-        }
         LinearLayout.LayoutParams hp = params(-1, -2); hp.topMargin = dp(26); page.addView(hero, hp);
 
         TextView section = text("TOOLS", 11, MUTED, true);
@@ -154,24 +88,36 @@ public class MainActivity extends Activity {
         LinearLayout manage = card(18);
         manage.setBackground(roundDrawable(CARD, 20));
         manage.setClickable(true); manage.setFocusable(true);
-        manage.setOnClickListener(v -> renderUsers());
+        manage.setOnClickListener(v -> openUserManager());
         LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
         TextView icon = text("01", 13, GREEN, true); icon.setGravity(Gravity.CENTER);
         icon.setBackground(roundDrawable(Color.rgb(231, 246, 237), 15));
         row.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
         LinearLayout labels = new LinearLayout(this); labels.setOrientation(LinearLayout.VERTICAL);
         TextView title = text("Guest user manager", 17, INK, true);
-        TextView subtitle = text(rootReady ? users.size() + " device users" : "Create, toggle and remove GuestUser", 13, MUTED, false);
+        TextView subtitle = text(homeUsersSummary(), 13, MUTED, false);
         homeUsersLabel = subtitle;
         labels.addView(title); LinearLayout.LayoutParams subp = params(-1, -2); subp.topMargin = dp(4); labels.addView(subtitle, subp);
         LinearLayout.LayoutParams labelp = new LinearLayout.LayoutParams(0, -2, 1); labelp.leftMargin = dp(14); row.addView(labels, labelp);
         TextView arrow = text("›", 30, MUTED, false); row.addView(arrow);
         manage.addView(row);
         LinearLayout.LayoutParams mp = params(-1, -2); mp.topMargin = dp(12); page.addView(manage, mp);
-        TextView hint = text("A polished interface for the proven Termux workflow: list users, create GuestUser, toggle profiles, and safely delete the guest.", 13, MUTED, false);
+        TextView hint = text("List users, create GuestUser, switch profiles, and safely remove a guest account.", 13, MUTED, false);
         hint.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams hintp = params(-1, -2); hintp.topMargin = dp(12); page.addView(hint, hintp);
         addFooter();
+    }
+
+    private String homeUsersSummary() {
+        if (loadingUsers) return "Loading device users…";
+        if (usersLoaded) return users.size() + (users.size() == 1 ? " device user" : " device users");
+        if (usersLoadError != null) return "Could not load users · tap to open";
+        return "Create, switch, and remove GuestUser";
+    }
+
+    private void openUserManager() {
+        renderUsers();
+        refreshUsers(false);
     }
 
     private void renderUsers() {
@@ -184,7 +130,10 @@ public class MainActivity extends Activity {
         back.setOnClickListener(v -> renderHome());
         LinearLayout heading = new LinearLayout(this); heading.setOrientation(LinearLayout.VERTICAL);
         TextView title = text("Guest controls", 27, INK, true);
-        TextView subtitle = text(users.size() + (users.size() == 1 ? " profile on this device" : " profiles on this device"), 13, MUTED, false);
+        String profileSummary = loadingUsers ? "Loading device users…"
+                : usersLoaded ? users.size() + (users.size() == 1 ? " profile on this device" : " profiles on this device")
+                : "Device user management";
+        TextView subtitle = text(profileSummary, 13, MUTED, false);
         heading.addView(title); LinearLayout.LayoutParams sub = params(-1, -2); sub.topMargin = dp(3); heading.addView(subtitle, sub);
         head.addView(heading);
         LinearLayout.LayoutParams headp = params(-1, -2); headp.topMargin = dp(24); page.addView(head, headp);
@@ -192,20 +141,24 @@ public class MainActivity extends Activity {
         DeviceUser guest = findGuest();
         Button toggle = button("⇄    Toggle Owner / Guest", true);
         LinearLayout.LayoutParams togglep = params(-1, 54); togglep.topMargin = dp(22); page.addView(toggle, togglep);
-        toggle.setEnabled(rootReady && guest != null);
+        toggle.setEnabled(usersLoaded && !loadingUsers && guest != null);
         toggle.setAlpha(toggle.isEnabled() ? 1f : .45f);
         toggle.setOnClickListener(v -> toggleGuest());
 
         Button create = button(guest == null ? "＋    Create GuestUser" : "✓    GuestUser exists · ID " + guest.id, false);
         LinearLayout.LayoutParams createp = params(-1, 52); createp.topMargin = dp(10); page.addView(create, createp);
-        create.setEnabled(rootReady && guest == null);
+        create.setEnabled(usersLoaded && !loadingUsers && guest == null);
         create.setAlpha(create.isEnabled() ? 1f : .55f);
         create.setOnClickListener(v -> createGuest());
 
         LinearLayout listCard = card(0); listCard.setBackground(roundDrawable(CARD, 20));
         LinearLayout.LayoutParams listp = params(-1, -2); listp.topMargin = dp(20); page.addView(listCard, listp);
         if (users.isEmpty()) {
-            TextView empty = text(rootReady ? "No users were returned by Android.\nTry refreshing the list." : "Waiting for root access to read users…", 14, MUTED, false);
+            String emptyMessage = loadingUsers ? "Loading device users…"
+                    : usersLoadError != null ? usersLoadError
+                    : usersLoaded ? "No users were returned by Android.\nTry refreshing the list."
+                    : "User list has not been loaded yet.";
+            TextView empty = text(emptyMessage, 14, MUTED, false);
             empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(34), dp(20), dp(34)); listCard.addView(empty);
         } else {
             for (int i = 0; i < users.size(); i++) {
@@ -220,8 +173,9 @@ public class MainActivity extends Activity {
         TextView note = text("Long-press any profile for actions. The owner profile is protected and can never be deleted.", 13, MUTED, false);
         note.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams notep = params(-1, -2); notep.topMargin = dp(16); page.addView(note, notep);
-        TextView refresh = text("↻   Refresh user list", 14, GREEN, true);
+        TextView refresh = text(loadingUsers ? "Refreshing user list…" : "↻   Refresh user list", 14, GREEN, true);
         refresh.setGravity(Gravity.CENTER); refresh.setPadding(0, dp(18), 0, dp(18));
+        refresh.setEnabled(!loadingUsers); refresh.setAlpha(loadingUsers ? .55f : 1f);
         LinearLayout.LayoutParams refreshp = params(-1, -2); refreshp.topMargin = dp(4); page.addView(refresh, refreshp);
         refresh.setOnClickListener(v -> refreshUsers(true));
         addFooter();
@@ -328,8 +282,6 @@ public class MainActivity extends Activity {
 
     private void executeAction(String pendingMessage, String command, boolean switchAction) {
         if (actionRunning) { showMessage("An operation is already in progress."); return; }
-        if (checkingRoot) { showMessage("Please wait for root verification."); return; }
-        if (!rootReady) { retryRoot(); return; }
         actionRunning = true;
         Toast.makeText(this, pendingMessage, Toast.LENGTH_SHORT).show();
         worker.execute(() -> {
@@ -337,26 +289,17 @@ public class MainActivity extends Activity {
             main.post(() -> {
                 actionRunning = false;
                 if (isFinishing() || isDestroyed()) return;
-                if (!result.rootVerified) {
-                    rootReady = false;
-                    users.clear();
-                    currentUser = -1;
-                    if (showingUsers) renderUsers(); else renderHome();
-                }
-                if (result.rootVerified && result.exitCode == 0 && !result.timedOut
+                if (result.commandStarted && result.exitCode == 0 && !result.timedOut
                         && !Pattern.compile("(?im)^\\s*(error:|failure|exception|java\\.)").matcher(result.output).find()) {
-                    if (switchAction) {
-                        showMessage("Switch request sent to Android.");
-                        refreshUsers(false);
-                    } else {
-                        showMessage(successMessage(command, result.output));
-                        refreshUsers(false);
-                    }
+                    if (switchAction) showMessage("Switch request sent to Android.");
+                    else showMessage(successMessage(command, result.output));
+                    refreshUsers(false);
                 } else {
                     String reason = result.timedOut ? "The command timed out. Refresh before retrying: Android may still complete it."
                             : cleanError(result.output);
                     showError("Could not complete action", reason);
-                    refreshUsers(false);
+                    // Do not silently issue a second privileged command after a failure.
+                    // Let the user explicitly refresh if they want another command sent.
                 }
             });
         });
@@ -370,30 +313,48 @@ public class MainActivity extends Activity {
     }
 
     private void refreshUsers(boolean announce) {
-        if (checkingRoot) return;
-        if (!rootReady) { if (announce) retryRoot(); return; }
+        if (loadingUsers) {
+            if (announce) showMessage("The user list is already refreshing.");
+            return;
+        }
+        loadingUsers = true;
+        usersLoadError = null;
+        if (showingUsers) renderUsers();
+        else if (homeUsersLabel != null) homeUsersLabel.setText(homeUsersSummary());
+
         worker.execute(() -> {
+            // Run the requested operation immediately through su; no separate `id` preflight.
             RootShell.Result list = runRoot("pm list users", 25);
-            RootShell.Result current = runRoot("am get-current-user", 25);
+            RootShell.Result current = list.commandStarted && list.exitCode == 0 && !list.timedOut
+                    ? runRoot("am get-current-user", 25) : null;
             List<DeviceUser> parsed = parseUsers(list.output);
             int active = -1;
-            Matcher m = Pattern.compile("(?m)^\\s*(\\d+)\\s*$").matcher(current.output);
-            if (m.find()) try { active = Integer.parseInt(m.group(1)); } catch (Exception ignored) {}
+            if (current != null && current.commandStarted && current.exitCode == 0 && !current.timedOut) {
+                Matcher m = Pattern.compile("(?m)^\\s*(\\d+)\\s*$").matcher(current.output);
+                if (m.find()) try { active = Integer.parseInt(m.group(1)); } catch (Exception ignored) {}
+            }
             final int activeId = active;
             main.post(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                if (!list.rootVerified || list.exitCode != 0 || list.timedOut) {
-                    if (!list.rootVerified) {
-                        rootReady = false; users.clear(); currentUser = -1;
-                        if (showingUsers) renderUsers(); else renderHome();
-                    }
-                    if (parsed.isEmpty()) showError("Unable to read users", cleanError(list.output));
-                    return;
+                loadingUsers = false;
+                boolean listSucceeded = list.commandStarted && list.exitCode == 0 && !list.timedOut;
+                if (!listSucceeded) {
+                    users.clear();
+                    currentUser = -1;
+                    usersLoaded = false;
+                    usersLoadError = cleanError(list.output);
+                } else {
+                    users.clear();
+                    users.addAll(parsed);
+                    currentUser = activeId;
+                    usersLoaded = true;
+                    usersLoadError = null;
                 }
-                users.clear(); users.addAll(parsed); currentUser = activeId;
                 if (showingUsers) renderUsers();
-                else if (homeUsersLabel != null) homeUsersLabel.setText(users.size() + " device users");
-                if (announce) showMessage("User list refreshed.");
+                else if (homeUsersLabel != null) homeUsersLabel.setText(homeUsersSummary());
+
+                if (!listSucceeded && announce) showError("Unable to read users", usersLoadError);
+                else if (listSucceeded && announce) showMessage("User list refreshed.");
             });
         });
     }
@@ -413,33 +374,6 @@ public class MainActivity extends Activity {
         return result;
     }
 
-    private void updateRootBadge(String label, boolean ready, boolean checking) {
-        if (rootBadge == null) return;
-        rootBadge.setText((ready ? "●  " : checking ? "◌  " : "○  ") + label);
-        rootBadge.setTextColor(ready ? GREEN : checking ? Color.rgb(172, 117, 30) : MUTED);
-        rootBadge.setBackground(roundDrawable(ready ? Color.rgb(228, 246, 235) : Color.rgb(238, 241, 239), 30));
-        if (rootProgress != null) rootProgress.setVisibility(checking ? View.VISIBLE : View.GONE);
-    }
-
-    private void showRootPass() {
-        TextView pass = text("✓   ROOT ACCESS GRANTED", 14, Color.WHITE, true);
-        pass.setGravity(Gravity.CENTER); pass.setPadding(dp(22), dp(14), dp(22), dp(14));
-        pass.setBackground(roundDrawable(Color.rgb(22, 145, 91), 28));
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        p.topMargin = dp(22); host.addView(pass, p); pass.setElevation(dp(12));
-        AlphaAnimation fadeIn = new AlphaAnimation(0f, 1f); fadeIn.setDuration(260); pass.startAnimation(fadeIn);
-        main.postDelayed(() -> {
-            if (pass.getParent() == null) return;
-            AlphaAnimation fadeOut = new AlphaAnimation(1f, 0f); fadeOut.setDuration(350);
-            fadeOut.setAnimationListener(new android.view.animation.Animation.AnimationListener() {
-                @Override public void onAnimationStart(android.view.animation.Animation animation) { }
-                @Override public void onAnimationEnd(android.view.animation.Animation animation) { if (pass.getParent() != null) host.removeView(pass); }
-                @Override public void onAnimationRepeat(android.view.animation.Animation animation) { }
-            });
-            pass.startAnimation(fadeOut);
-        }, 2200);
-    }
-
     private void buildPage() {
         host = new FrameLayout(this); host.setBackgroundColor(BG);
         ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false);
@@ -456,10 +390,7 @@ public class MainActivity extends Activity {
         bar.addView(mark, new LinearLayout.LayoutParams(dp(38), dp(38)));
         TextView appName = text("ROOT TOOLS", 13, INK, true);
         LinearLayout.LayoutParams an = new LinearLayout.LayoutParams(0, -2, 1); an.leftMargin = dp(10); bar.addView(appName, an);
-        rootBadge = text("", 10, GREEN, true); rootBadge.setPadding(dp(11), dp(8), dp(11), dp(8));
-        bar.addView(rootBadge); updateRootBadge(rootReady ? "ROOT READY" : checkingRoot ? "CHECKING ROOT" : "ROOT NEEDED", rootReady, checkingRoot);
         page.addView(bar, params(-1, 46));
-        rootBadge.setOnClickListener(v -> retryRoot());
     }
 
     private void addFooter() {
@@ -502,7 +433,7 @@ public class MainActivity extends Activity {
     private String initials(String name) { String clean = name.trim(); return clean.isEmpty() ? "U" : clean.substring(0, 1).toUpperCase(Locale.ROOT); }
     private String cleanError(String output) {
         String value = output == null ? "" : output.trim();
-        if (value.isEmpty()) return "The root command failed. Check that your root manager granted access.";
+        if (value.isEmpty()) return "The command returned no output. Check the operation and try again.";
         if (value.length() > 280) value = value.substring(0, 280) + "…";
         return value;
     }

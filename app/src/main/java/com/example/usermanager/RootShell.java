@@ -9,7 +9,9 @@ import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Runs one operation once, in the same shell in which UID 0 is verified.
+ * Runs one requested operation through {@code su}, without a separate UID-check command.
+ * A marker records whether the payload started so the legacy protocol can only be
+ * retried when the first invocation rejected {@code -c} before running anything.
  *
  * <p>Two invocation protocols are supported, in this order:
  * <ol>
@@ -21,7 +23,7 @@ import java.util.concurrent.TimeUnit;
  * </ol>
  */
 final class RootShell {
-    private static final String VERIFIED = "__ROOT_TOOLS_UID_ZERO__";
+    private static final String COMMAND_STARTED = "__ROOT_TOOLS_COMMAND_STARTED__";
     private static final int OUTPUT_LIMIT = 128 * 1024;
     private final String[] candidates;
 
@@ -36,12 +38,12 @@ final class RootShell {
         final String output;
         final int exitCode;
         final boolean timedOut;
-        final boolean rootVerified;
-        Result(String output, int exitCode, boolean timedOut, boolean rootVerified) {
+        final boolean commandStarted;
+        Result(String output, int exitCode, boolean timedOut, boolean commandStarted) {
             this.output = output;
             this.exitCode = exitCode;
             this.timedOut = timedOut;
-            this.rootVerified = rootVerified;
+            this.commandStarted = commandStarted;
         }
     }
 
@@ -75,7 +77,7 @@ final class RootShell {
             // A few root managers ship a `su` that does not understand `-c`.  Only
             // the very same binary is retried, with the legacy stdin protocol, and
             // only when the first attempt provably did not run anything (a usage
-            // error and no verification marker).  The operation still executes at
+            // error and no command-start marker). The operation still executes at
             // most once.
             Process legacy = null;
             try {
@@ -84,26 +86,25 @@ final class RootShell {
                 return result;
             }
             Result retry = execute(legacy, script, timeoutSeconds, true);
-            if (retry.rootVerified || !retry.output.isEmpty()) return retry;
+            if (retry.commandStarted || !retry.output.isEmpty()) return retry;
         }
         return result;
     }
 
     private static String buildScript(String command) {
         return "export PATH=/system/bin:/system/xbin:/sbin:$PATH\n"
-                + "if [ \"$(id -u)\" != \"0\" ]; then echo 'Superuser shell did not provide UID 0'; exit 77; fi\n"
-                + "echo '" + VERIFIED + "'\n"
+                + "echo '" + COMMAND_STARTED + "'\n"
                 + "(\n" + command + "\n)\n"
                 + "result=$?\nexit \"$result\"\n";
     }
 
     /**
-     * Detects the "this su does not support -c" case.  The verification marker is
+     * Detects the "this su does not support -c" case. The command-start marker is
      * printed before the operation runs, so its absence proves that nothing was
      * executed and that a retry is safe.
      */
     private static boolean rejectedDashC(Result result) {
-        if (result.timedOut || result.rootVerified) return false;
+        if (result.timedOut || result.commandStarted) return false;
         if (result.exitCode != 1 && result.exitCode != 2 && result.exitCode != 64
                 && result.exitCode != 126 && result.exitCode != 127) return false;
         String output = result.output.toLowerCase(Locale.ROOT);
@@ -182,12 +183,12 @@ final class RootShell {
         }
         String output;
         synchronized (captured) { output = new String(captured.toByteArray(), StandardCharsets.UTF_8); }
-        boolean verified = java.util.regex.Pattern.compile("(?m)^" + VERIFIED + "\\r?$").matcher(output).find();
-        output = output.replaceAll("(?m)^" + VERIFIED + "\\r?\\n?", "").trim();
+        boolean commandStarted = java.util.regex.Pattern.compile("(?m)^" + COMMAND_STARTED + "\\r?$").matcher(output).find();
+        output = output.replaceAll("(?m)^" + COMMAND_STARTED + "\\r?\\n?", "").trim();
         if (failure.isEmpty() && writeFailure.get() != null) failure = writeFailure.get();
         if (!failure.isEmpty()) output += "\n" + failure;
         if (timedOut) output += "\nTimed out after " + timeoutSeconds
                 + " seconds. The operation may have started; refresh before retrying.";
-        return new Result(output.trim(), exitCode, timedOut, verified);
+        return new Result(output.trim(), exitCode, timedOut, commandStarted);
     }
 }
