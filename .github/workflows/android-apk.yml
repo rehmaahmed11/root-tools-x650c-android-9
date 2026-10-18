@@ -147,17 +147,20 @@ jobs:
             ${{ env.CI_LOG_DIR }}/ci-report.md
             ${{ env.CI_LOG_DIR }}/ci-report.json
             ${{ env.CI_LOG_DIR }}/ci-report.txt
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30
 
       # Last-resort layer: if something still failed, publish diagnostics so
       # every run always leaves an artifact behind to debug with.
-      - name: Upload diagnostics on failure
+      # `include-hidden-files` is required because the log directory is dotted.
+      - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: build-diagnostics
           path: ${{ env.CI_LOG_DIR }}/
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
 
@@ -238,5 +241,6 @@ jobs:
             ${{ env.CI_LOG_DIR }}/ci-report.md
             ${{ env.CI_LOG_DIR }}/ci-report.json
             ${{ env.CI_LOG_DIR }}/ci-report.txt
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30
