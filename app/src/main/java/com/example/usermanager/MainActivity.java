@@ -160,15 +160,15 @@ public class MainActivity extends Activity {
         icon.setBackground(roundDrawable(Color.rgb(231, 246, 237), 15));
         row.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
         LinearLayout labels = new LinearLayout(this); labels.setOrientation(LinearLayout.VERTICAL);
-        TextView title = text("User management", 17, INK, true);
-        TextView subtitle = text(rootReady ? users.size() + " device users" : "Create and switch device users", 13, MUTED, false);
+        TextView title = text("Guest user manager", 17, INK, true);
+        TextView subtitle = text(rootReady ? users.size() + " device users" : "Create, toggle and remove GuestUser", 13, MUTED, false);
         homeUsersLabel = subtitle;
         labels.addView(title); LinearLayout.LayoutParams subp = params(-1, -2); subp.topMargin = dp(4); labels.addView(subtitle, subp);
         LinearLayout.LayoutParams labelp = new LinearLayout.LayoutParams(0, -2, 1); labelp.leftMargin = dp(14); row.addView(labels, labelp);
         TextView arrow = text("›", 30, MUTED, false); row.addView(arrow);
         manage.addView(row);
         LinearLayout.LayoutParams mp = params(-1, -2); mp.topMargin = dp(12); page.addView(manage, mp);
-        TextView hint = text("Tap to see every profile on this device. Hold a user to switch, rename, or remove it.", 13, MUTED, false);
+        TextView hint = text("A polished interface for the proven Termux workflow: list users, create GuestUser, toggle profiles, and safely delete the guest.", 13, MUTED, false);
         hint.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams hintp = params(-1, -2); hintp.topMargin = dp(12); page.addView(hint, hintp);
         addFooter();
@@ -183,15 +183,24 @@ public class MainActivity extends Activity {
         head.addView(back, new LinearLayout.LayoutParams(dp(42), dp(48)));
         back.setOnClickListener(v -> renderHome());
         LinearLayout heading = new LinearLayout(this); heading.setOrientation(LinearLayout.VERTICAL);
-        TextView title = text("Your users", 27, INK, true);
+        TextView title = text("Guest controls", 27, INK, true);
         TextView subtitle = text(users.size() + (users.size() == 1 ? " profile on this device" : " profiles on this device"), 13, MUTED, false);
         heading.addView(title); LinearLayout.LayoutParams sub = params(-1, -2); sub.topMargin = dp(3); heading.addView(subtitle, sub);
         head.addView(heading);
         LinearLayout.LayoutParams headp = params(-1, -2); headp.topMargin = dp(24); page.addView(head, headp);
 
-        Button create = button("＋    Create a user", true);
-        LinearLayout.LayoutParams createp = params(-1, 54); createp.topMargin = dp(22); page.addView(create, createp);
-        create.setOnClickListener(v -> showCreateDialog());
+        DeviceUser guest = findGuest();
+        Button toggle = button("⇄    Toggle Owner / Guest", true);
+        LinearLayout.LayoutParams togglep = params(-1, 54); togglep.topMargin = dp(22); page.addView(toggle, togglep);
+        toggle.setEnabled(rootReady && guest != null);
+        toggle.setAlpha(toggle.isEnabled() ? 1f : .45f);
+        toggle.setOnClickListener(v -> toggleGuest());
+
+        Button create = button(guest == null ? "＋    Create GuestUser" : "✓    GuestUser exists · ID " + guest.id, false);
+        LinearLayout.LayoutParams createp = params(-1, 52); createp.topMargin = dp(10); page.addView(create, createp);
+        create.setEnabled(rootReady && guest == null);
+        create.setAlpha(create.isEnabled() ? 1f : .55f);
+        create.setOnClickListener(v -> createGuest());
 
         LinearLayout listCard = card(0); listCard.setBackground(roundDrawable(CARD, 20));
         LinearLayout.LayoutParams listp = params(-1, -2); listp.topMargin = dp(20); page.addView(listCard, listp);
@@ -244,18 +253,16 @@ public class MainActivity extends Activity {
     }
 
     private void showUserActions(DeviceUser user) {
-        String[] actions = user.id == 0
-                ? new String[]{user.id == currentUser ? "Owner · current user" : "Switch to owner"}
-                : new String[]{user.id == currentUser ? "Currently active" : "Switch to this user", "Rename user", "Delete user"};
+        boolean guest = "GuestUser".equals(user.name);
+        String[] actions = guest
+                ? new String[]{user.id == currentUser ? "Currently active" : "Switch to GuestUser", "Delete GuestUser"}
+                : new String[]{user.id == currentUser ? "Currently active" : "Switch to this user"};
         new AlertDialog.Builder(this)
-                .setTitle(user.name + (user.id == 0 ? "  ·  Owner" : ""))
+                .setTitle(user.name + (user.id == 0 ? "  ·  Owner" : guest ? "  ·  Guest" : ""))
                 .setItems(actions, (dialog, which) -> {
-                    if (user.id == 0) {
+                    if (which == 0) {
                         if (user.id != currentUser) confirmSwitch(user);
-                    } else if (which == 0) {
-                        if (user.id != currentUser) confirmSwitch(user);
-                    } else if (which == 1) showRenameDialog(user);
-                    else confirmDelete(user);
+                    } else if (guest) confirmDelete(user);
                 }).setNegativeButton("Cancel", null).show();
     }
 
@@ -273,23 +280,38 @@ public class MainActivity extends Activity {
                 .setMessage("This permanently removes this Android user and its local data. This cannot be undone.")
                 .setNegativeButton("Keep user", null)
                 .setPositiveButton("Delete", (d, w) -> {
-                    String command = "pm remove-user " + user.id;
+                    String command = "pm remove-user --guest " + user.id;
                     if (user.id == currentUser) command = "am switch-user 0 && sleep 2 && " + command;
                     executeAction("Deleting user…", command, false);
                 }).show();
     }
 
-    private void showCreateDialog() {
-        EditText input = nameInput("e.g. Work profile");
-        new AlertDialog.Builder(this).setTitle("Create a user")
-                .setMessage("Add a separate Android user with its own apps and data.")
-                .setView(dialogInput(input))
+    private DeviceUser findGuest() {
+        for (DeviceUser user : users) if ("GuestUser".equals(user.name)) return user;
+        return null;
+    }
+
+    private void createGuest() {
+        if (findGuest() != null) { showMessage("GuestUser already exists."); return; }
+        new AlertDialog.Builder(this).setTitle("Create GuestUser?")
+                .setMessage("Android will create a separate guest profile with its own apps and data.")
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Create", (d, w) -> {
-                    String name = input.getText().toString().trim();
-                    if (!validName(name)) { showMessage("Choose a name from 1 to 32 characters (letters, numbers, spaces, _ . or -). "); return; }
-                    executeAction("Creating “" + name + "”…", "pm create-user " + shellQuote(name), false);
-                }).show();
+                .setPositiveButton("Create guest", (d, w) ->
+                        executeAction("Creating GuestUser…", "pm create-user --guest GuestUser", false))
+                .show();
+    }
+
+    private void toggleGuest() {
+        DeviceUser guest = findGuest();
+        if (guest == null) { showMessage("No GuestUser exists. Create it first."); return; }
+        String destination = currentUser == 0 ? "GuestUser" : "Owner";
+        new AlertDialog.Builder(this).setTitle("Switch to " + destination + "?")
+                .setMessage("This uses the same automatic toggle as the working Termux script.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Switch", (d, w) -> executeAction("Switching to " + destination + "…",
+                        "if [ $(am get-current-user) -eq 0 ]; then am switch-user " + guest.id
+                                + "; else am switch-user 0; fi", true))
+                .show();
     }
 
     private void showRenameDialog(DeviceUser user) {
