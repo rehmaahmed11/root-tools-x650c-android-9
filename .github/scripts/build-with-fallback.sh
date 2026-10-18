@@ -18,6 +18,10 @@
 #   6. Verify:   the script only exits 0 if app/build/outputs/apk/debug/
 #                app-debug.apk exists and is non-empty. Logs for diagnostics
 #                are kept in .github-ci-logs/.
+#
+# The script also publishes its findings so the later CI steps can chain on
+# them: $GITHUB_OUTPUT (build_mode / apk_path / apk_sha256 / apk_size) and
+# .github-ci-logs/build-result.json.
 # ============================================================================
 set -u -o pipefail
 
@@ -26,10 +30,17 @@ cd "$REPO_ROOT"
 
 CI_GRADLE_VERSION="${CI_GRADLE_VERSION:-8.9}"
 EXPECTED_APK="${EXPECTED_APK:-app/build/outputs/apk/debug/app-debug.apk}"
-LOG_DIR="$REPO_ROOT/.github-ci-logs"
+LOG_DIR="${CI_LOG_DIR:-.github-ci-logs}"
+case "$LOG_DIR" in
+  /*) : ;;
+  *) LOG_DIR="$REPO_ROOT/$LOG_DIR" ;;
+esac
 GRADLE_DIST_DIR="$HOME/gradle-dist"
 SUMMARY_FILE="$LOG_DIR/summary.txt"
+RESULT_FILE="$LOG_DIR/build-result.json"
 BUILD_MODE="unknown"
+BUILD_STATUS="failed"
+BUILD_STARTED="$(date +%s)"
 
 mkdir -p "$LOG_DIR" "$GRADLE_DIST_DIR"
 : > "$SUMMARY_FILE"
@@ -41,6 +52,43 @@ note() { printf '%s\n' "$*" >> "$SUMMARY_FILE"; }
 
 summary() { # append to $GITHUB_STEP_SUMMARY when present
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY" || true
+}
+
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\r'; }
+
+# $GITHUB_OUTPUT values are plain text: no newlines, no JSON escaping.
+flat() { printf '%s' "$1" | tr '\r\n' '  ' | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//'; }
+
+publish_result() { # status -> writes build-result.json and $GITHUB_OUTPUT
+  local status="$1"
+  local sha="" size="" apk_path=""
+  if [ -s "$EXPECTED_APK" ]; then
+    apk_path="$EXPECTED_APK"
+    sha="$(sha256sum "$EXPECTED_APK" | cut -d' ' -f1)"
+    size="$(wc -c < "$EXPECTED_APK" | tr -d ' ')"
+  fi
+  local duration=$(( $(date +%s) - BUILD_STARTED ))
+  {
+    printf '{\n'
+    printf '  "status": "%s",\n' "$(json_escape "$status")"
+    printf '  "buildMode": "%s",\n' "$(json_escape "$BUILD_MODE")"
+    printf '  "apkPath": "%s",\n' "$(json_escape "$apk_path")"
+    printf '  "apkSha256": "%s",\n' "$(json_escape "$sha")"
+    printf '  "apkSizeBytes": %s,\n' "${size:-0}"
+    printf '  "gradleVersion": "%s",\n' "$(json_escape "${CI_GRADLE_VERSION:-8.9}")"
+    printf '  "durationSeconds": %s\n' "$duration"
+    printf '}\n'
+  } > "$RESULT_FILE"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    {
+      printf 'build_status=%s\n' "$status"
+      printf 'build_mode=%s\n' "$(flat "$BUILD_MODE")"
+      printf 'apk_path=%s\n' "$(flat "$apk_path")"
+      printf 'apk_sha256=%s\n' "$sha"
+      printf 'apk_size_bytes=%s\n' "${size:-0}"
+      printf 'build_duration_seconds=%s\n' "$duration"
+    } >> "$GITHUB_OUTPUT"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -258,6 +306,12 @@ manual_build_apk() {
 
   work="$REPO_ROOT/.manual-build"
   rm -rf "$work"; mkdir -p "$work/gen" "$work/classes" "$work/dex"
+  local javac_sources
+  javac_sources="$(find "$work/gen" -name '*.java' 2>/dev/null; find app/src/main/java -name '*.java' 2>/dev/null)"
+  if [ -z "$javac_sources" ]; then
+    fail "manual: no Java sources found to compile"
+    return 1
+  fi
   {
     set -x
     # Manifest without a package attribute gets one injected for aapt2.
@@ -275,10 +329,9 @@ manual_build_apk() {
       --version-code 2 --version-name 1.0.1 \
       --auto-add-overlay "$work/res.zip" &&
 
+    # shellcheck disable=SC2086
     javac -encoding UTF-8 -classpath "$aj" -source 17 -target 17 \
-      -d "$work/classes" \
-      "$(find "$work/gen" -name 'R.java')" \
-      $(find app/src/main/java -name '*.java') &&
+      -d "$work/classes" $javac_sources &&
 
     "$bt/d8" --release --lib "$aj" --min-api 28 \
       --output "$work/dex" $(find "$work/classes" -name '*.class') &&
@@ -329,6 +382,11 @@ verify_apk() {
 # ---------------------------------------------------------------------------
 main() {
   log "Root Tools bulletproof build starting in $REPO_ROOT"
+  # A stale APK from an earlier step must never be mistaken for a fresh build.
+  if [ -e "$EXPECTED_APK" ]; then
+    warn "Removing the pre-existing $EXPECTED_APK so only a fresh build can satisfy it"
+    rm -f "$EXPECTED_APK"
+  fi
   pick_jdk || warn "Proceeding with default JDK"
   setup_sdk || warn "SDK setup incomplete; fallback paths will try to cope"
 
@@ -340,9 +398,12 @@ main() {
   fi
 
   if verify_apk; then
+    BUILD_STATUS="succeeded"
+    publish_result "$BUILD_STATUS"
     summary
     exit 0
   fi
+  publish_result "$BUILD_STATUS"
   summary
   fail "All build layers failed. Diagnostics were kept in $LOG_DIR"
   exit 1

@@ -15,7 +15,21 @@ Root access must be granted by the device's installed superuser manager. User sw
 
 ## CI
 
-The `Build Android APK` workflow is designed so that a run essentially cannot fail without producing the APK:
+The `Build Android APK` workflow is a **chained tool pipeline**. Every stage
+publishes its result as step outputs, and every later stage consumes them, so a
+failure is always explained by the stage before it.
+
+| # | Stage | Script | Publishes |
+|---|---|---|---|
+| 1 | Environment probe | `.github/scripts/probe-toolchain.sh` | `java_version`, `gradle_version`, `sdk_dir`, `build_tools` |
+| 2 | Host-side regression tests | `tests/run-root-shell-tests.sh` | `test_status`, `test_passed`, `test_failed`, `test_failure` |
+| 3 | APK build (layered fallbacks) | `.github/scripts/build-with-fallback.sh` | `build_status`, `build_mode`, `apk_sha256`, `apk_size_bytes` |
+| 4 | Artifact verification | `.github/scripts/verify-apk.sh` | `apk_sha256`, `apk_size_bytes`, `apk_verified` |
+| 5 | CI report | `.github/scripts/ci-report.sh` | `ci-report.md` / `.json` / `.txt` + job summary |
+| 6 | Report job (always runs) | `.github/scripts/ci-report.sh` | `ci-report` artifact |
+
+The build stage itself is still layered, so a run essentially cannot fail
+without producing the APK:
 
 1. Uses the Android SDK preinstalled on GitHub runners (no flaky SDK setup action); missing SDK packages are only fetched if absent, with retries.
 2. Provisions Gradle 8.9 from cache, the repo wrapper, a compatible preinstalled Gradle, or three download mirrors with zip-integrity checks.
@@ -24,6 +38,39 @@ The `Build Android APK` workflow is designed so that a run essentially cannot fa
 5. Always uploads `root-tools-debug-apk` (with an upload retry); if anything still fails, a `build-diagnostics` artifact is published with the build logs.
 
 The build engine lives in `.github/scripts/build-with-fallback.sh` and exits non-zero only if no APK could be produced at all.
+
+### Reading the CI report
+
+Every run — successful or not — leaves a report behind. Download it with:
+
+```sh
+gh run download <run-id> --name ci-report        # final consolidated report
+gh run download <run-id> --name ci-report-run    # report written by the build job
+gh run download <run-id> --name build-diagnostics --dir logs   # raw logs
+```
+
+| File | Purpose |
+|---|---|
+| `ci-report.md` | Human readable: verdict, tool chain table, artifact facts, extracted test/build/SDK evidence and a **What to do next** section. The same content is rendered in the run's job summary. |
+| `ci-report.json` | The same facts as a single machine readable object — the easiest thing to parse when planning the next change. |
+| `ci-report.txt` | The same facts without markup. |
+
+The report names the exact stage that failed and quotes the relevant log
+lines, so the next iteration can be planned from evidence instead of guesswork.
+
+### Guardrails against repeat failures
+
+- The runner image is pinned to `ubuntu-24.04` so the scheduled
+  `ubuntu-latest` image change cannot break a build unnoticed.
+- Actions are pinned to their Node 24 majors (`checkout@v7`, `setup-java@v6`,
+  `cache@v6`, `upload-artifact@v7`, `download-artifact@v8`).
+- A failing test suite no longer aborts the build: the APK is still produced
+  and the report is still written. A **gate** step at the end of the job turns
+  the test failure into a red build, so nothing is silently swallowed.
+- The test runner has a hard timeout, so a hanging fake `su` can never burn
+  the whole job budget.
+- The root-shell test fixtures speak both `su` protocols, so a change to the
+  invocation convention cannot silently invalidate the suite.
 
 ## Build locally
 
@@ -63,6 +110,14 @@ bash tests/run-root-shell-tests.sh
 
 Tests use fake superuser executables; no real root or Android device is needed.
 They cover approval, non-root rejection, denial diagnostics, executable-path
-fallbacks, large output, exit codes, and timeouts without command replay. CI runs
-them before building the APK. A physical rooted-device test is still required to
-validate device-specific root managers, SELinux policy, and user-management support.
+fallbacks, large output, exit codes, and timeouts without command replay. They
+also pin the `su` invocation contract: the suite asserts that the modern
+`su -c <script>` protocol is used, that a `su` without `-c` support still works
+through the legacy stdin protocol, and that a `su` rejecting both fails fast
+instead of hanging. CI runs them before building the APK.
+
+If `javac` is unavailable, set `ECJ_JAR` to an Eclipse compiler jar
+(`org.eclipse.jdt.internal.compiler.batch.Main`) to run the suite anyway.
+
+A physical rooted-device test is still required to validate device-specific
+root managers, SELinux policy, and user-management support.
