@@ -25,8 +25,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /** Android multi-user controls; requested shell operations run off the UI thread. */
 public class MainActivity extends Activity {
@@ -44,7 +42,7 @@ public class MainActivity extends Activity {
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final List<DeviceUser> users = new ArrayList<>();
+    private final List<RootShell.DeviceUser> users = new ArrayList<>();
     private FrameLayout host;
     private LinearLayout page;
     private TextView homeUsersLabel;
@@ -53,9 +51,11 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setStatusBarColor(BG);
-        getWindow().setNavigationBarColor(BG);
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        try {
+            getWindow().setStatusBarColor(BG);
+            getWindow().setNavigationBarColor(BG);
+            getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        } catch (Throwable ignored) { }
         // Open the interface immediately. The real user-list command is issued
         // only when the user opens Guest controls, with no separate root preflight.
         renderHome();
@@ -73,6 +73,8 @@ public class MainActivity extends Activity {
         LinearLayout hero = card(22);
         hero.setBackground(roundDrawable(Color.rgb(27, 57, 45), 24));
         hero.setPadding(dp(22), dp(20), dp(22), dp(20));
+        hero.setClickable(true); hero.setFocusable(true);
+        hero.setOnClickListener(v -> openUserManager());
         TextView heroOver = text("MULTI-USER TOOLS", 11, Color.rgb(176, 224, 198), true);
         hero.addView(heroOver);
         TextView heroTitle = text("Manage your profiles", 21, Color.WHITE, true);
@@ -116,7 +118,11 @@ public class MainActivity extends Activity {
     }
 
     private void openUserManager() {
-        renderUsers();
+        showingUsers = true;
+        if (loadingUsers) {
+            renderUsers();
+            return;
+        }
         refreshUsers(false);
     }
 
@@ -138,16 +144,19 @@ public class MainActivity extends Activity {
         head.addView(heading);
         LinearLayout.LayoutParams headp = params(-1, -2); headp.topMargin = dp(24); page.addView(head, headp);
 
-        DeviceUser guest = findGuest();
+        RootShell.DeviceUser guest = findGuest();
         Button toggle = button("⇄    Toggle Owner / Guest", true);
         LinearLayout.LayoutParams togglep = params(-1, 54); togglep.topMargin = dp(22); page.addView(toggle, togglep);
-        toggle.setEnabled(usersLoaded && !loadingUsers && guest != null);
+        toggle.setEnabled(!loadingUsers && !actionRunning && guest != null);
         toggle.setAlpha(toggle.isEnabled() ? 1f : .45f);
         toggle.setOnClickListener(v -> toggleGuest());
 
-        Button create = button(guest == null ? "＋    Create GuestUser" : "✓    GuestUser exists · ID " + guest.id, false);
+        String createLabel = guest == null
+                ? (actionRunning ? "Working…" : "＋    Create GuestUser")
+                : "✓    " + guest.name + " exists · ID " + guest.id;
+        Button create = button(createLabel, false);
         LinearLayout.LayoutParams createp = params(-1, 52); createp.topMargin = dp(10); page.addView(create, createp);
-        create.setEnabled(usersLoaded && !loadingUsers && guest == null);
+        create.setEnabled(!loadingUsers && !actionRunning && guest == null);
         create.setAlpha(create.isEnabled() ? 1f : .55f);
         create.setOnClickListener(v -> createGuest());
 
@@ -162,7 +171,7 @@ public class MainActivity extends Activity {
             empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(34), dp(20), dp(34)); listCard.addView(empty);
         } else {
             for (int i = 0; i < users.size(); i++) {
-                DeviceUser user = users.get(i);
+                RootShell.DeviceUser user = users.get(i);
                 listCard.addView(userRow(user));
                 if (i < users.size() - 1) {
                     View divider = new View(this); divider.setBackgroundColor(LINE);
@@ -170,18 +179,19 @@ public class MainActivity extends Activity {
                 }
             }
         }
-        TextView note = text("Long-press any profile for actions. The owner profile is protected and can never be deleted.", 13, MUTED, false);
+        TextView note = text("Tap or long-press any profile for actions. The owner profile is protected and can never be deleted.", 13, MUTED, false);
         note.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams notep = params(-1, -2); notep.topMargin = dp(16); page.addView(note, notep);
         TextView refresh = text(loadingUsers ? "Refreshing user list…" : "↻   Refresh user list", 14, GREEN, true);
         refresh.setGravity(Gravity.CENTER); refresh.setPadding(0, dp(18), 0, dp(18));
-        refresh.setEnabled(!loadingUsers); refresh.setAlpha(loadingUsers ? .55f : 1f);
+        refresh.setEnabled(!loadingUsers && !actionRunning);
+        refresh.setAlpha(refresh.isEnabled() ? 1f : .55f);
         LinearLayout.LayoutParams refreshp = params(-1, -2); refreshp.topMargin = dp(4); page.addView(refresh, refreshp);
         refresh.setOnClickListener(v -> refreshUsers(true));
         addFooter();
     }
 
-    private View userRow(DeviceUser user) {
+    private View userRow(RootShell.DeviceUser user) {
         LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(17), dp(15), dp(16), dp(15)); row.setMinimumHeight(dp(78));
         TextView avatar = text(initials(user.name), 15, GREEN, true); avatar.setGravity(Gravity.CENTER);
@@ -190,7 +200,8 @@ public class MainActivity extends Activity {
         LinearLayout details = new LinearLayout(this); details.setOrientation(LinearLayout.VERTICAL);
         TextView name = text(user.name, 16, INK, true);
         LinearLayout.LayoutParams namep = params(-1, -2); details.addView(name, namep);
-        String identity = user.id == 0 ? "Owner · ID 0" : "User · ID " + user.id;
+        String identity = user.id == 0 ? "Owner · ID 0"
+                : (user.guest ? "Guest · ID " + user.id : "User · ID " + user.id);
         if (user.id == currentUser) identity += "  ·  CURRENT";
         else if (user.running) identity += "  ·  RUNNING";
         TextView meta = text(identity, 11, user.id == currentUser ? GREEN : MUTED, true);
@@ -198,99 +209,110 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams detailp = new LinearLayout.LayoutParams(0, -2, 1); detailp.leftMargin = dp(13); row.addView(details, detailp);
         TextView menu = text("•••", 17, MUTED, true); menu.setGravity(Gravity.CENTER);
         row.addView(menu, new LinearLayout.LayoutParams(dp(36), dp(44)));
-        View.OnLongClickListener actions = v -> { showUserActions(user); return true; };
-        row.setOnLongClickListener(actions); name.setOnLongClickListener(actions); avatar.setOnLongClickListener(actions);
+        row.setOnLongClickListener(v -> { showUserActions(user); return true; });
         row.setOnClickListener(v -> showUserActions(user));
         menu.setOnClickListener(v -> showUserActions(user));
         row.setBackground(ripple(roundDrawable(Color.TRANSPARENT, 0)));
         return row;
     }
 
-    private void showUserActions(DeviceUser user) {
-        boolean guest = "GuestUser".equals(user.name);
+    private void showUserActions(RootShell.DeviceUser user) {
+        boolean guest = user.guest;
         String[] actions = guest
-                ? new String[]{user.id == currentUser ? "Currently active" : "Switch to GuestUser", "Delete GuestUser"}
+                ? new String[]{user.id == currentUser ? "Currently active" : "Switch to " + user.name, "Delete " + user.name}
                 : new String[]{user.id == currentUser ? "Currently active" : "Switch to this user"};
-        new AlertDialog.Builder(this)
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
                 .setTitle(user.name + (user.id == 0 ? "  ·  Owner" : guest ? "  ·  Guest" : ""))
                 .setItems(actions, (dialog, which) -> {
                     if (which == 0) {
                         if (user.id != currentUser) confirmSwitch(user);
                     } else if (guest) confirmDelete(user);
-                }).setNegativeButton("Cancel", null).show();
+                }).setNegativeButton("Cancel", null);
+        safeShowDialog(builder);
     }
 
-    private void confirmSwitch(DeviceUser user) {
-        new AlertDialog.Builder(this).setTitle("Switch user?")
+    private void confirmSwitch(RootShell.DeviceUser user) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("Switch user?")
                 .setMessage("Switch Android to “" + user.name + "”? Your device will move to that user’s profile.")
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Switch", (d, w) -> executeAction("Switching to " + user.name + "…", "am switch-user " + user.id, true))
-                .show();
+                .setPositiveButton("Switch", (d, w) -> executeAction("Switching to " + user.name + "…", "am switch-user " + user.id, true));
+        safeShowDialog(builder);
     }
 
-    private void confirmDelete(DeviceUser user) {
+    private void confirmDelete(RootShell.DeviceUser user) {
         if (user.id == 0) { showMessage("The owner profile is protected and cannot be deleted."); return; }
-        new AlertDialog.Builder(this).setTitle("Delete “" + user.name + "”?")
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("Delete “" + user.name + "”?")
                 .setMessage("This permanently removes this Android user and its local data. This cannot be undone.")
                 .setNegativeButton("Keep user", null)
                 .setPositiveButton("Delete", (d, w) -> {
-                    String command = "pm remove-user --guest " + user.id;
+                    String command = "pm remove-user " + user.id;
                     if (user.id == currentUser) command = "am switch-user 0 && sleep 2 && " + command;
                     executeAction("Deleting user…", command, false);
-                }).show();
+                });
+        safeShowDialog(builder);
     }
 
-    private DeviceUser findGuest() {
-        for (DeviceUser user : users) if ("GuestUser".equals(user.name)) return user;
+    private RootShell.DeviceUser findGuest() {
+        for (int i = 0; i < users.size(); i++) {
+            RootShell.DeviceUser user = users.get(i);
+            if ("GuestUser".equals(user.name)) return user;
+        }
+        for (int i = 0; i < users.size(); i++) {
+            RootShell.DeviceUser user = users.get(i);
+            if (user.guest) return user;
+        }
         return null;
     }
 
     private void createGuest() {
-        if (findGuest() != null) { showMessage("GuestUser already exists."); return; }
-        new AlertDialog.Builder(this).setTitle("Create GuestUser?")
+        RootShell.DeviceUser existing = findGuest();
+        if (existing != null) { showMessage(existing.name + " already exists (ID " + existing.id + ")."); return; }
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("Create GuestUser?")
                 .setMessage("Android will create a separate guest profile with its own apps and data.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Create guest", (d, w) ->
-                        executeAction("Creating GuestUser…", "pm create-user --guest GuestUser", false))
-                .show();
+                        executeAction("Creating GuestUser…", "pm create-user --guest GuestUser", false));
+        safeShowDialog(builder);
     }
 
     private void toggleGuest() {
-        DeviceUser guest = findGuest();
+        RootShell.DeviceUser guest = findGuest();
         if (guest == null) { showMessage("No GuestUser exists. Create it first."); return; }
-        String destination = currentUser == 0 ? "GuestUser" : "Owner";
-        new AlertDialog.Builder(this).setTitle("Switch to " + destination + "?")
+        String destination = (currentUser == 0 || (currentUser < 0 && !guest.running)) ? guest.name : "Owner";
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("Switch to " + destination + "?")
                 .setMessage("This uses the same automatic toggle as the working Termux script.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Switch", (d, w) -> executeAction("Switching to " + destination + "…",
-                        "if [ $(am get-current-user) -eq 0 ]; then am switch-user " + guest.id
-                                + "; else am switch-user 0; fi", true))
-                .show();
+                        "if [ \"$(am get-current-user 2>/dev/null | tr -d '\\r\\n ')\" = \"0\" ]; then am switch-user "
+                                + guest.id + "; else am switch-user 0; fi", true));
+        safeShowDialog(builder);
     }
 
-    private void showRenameDialog(DeviceUser user) {
+    private void showRenameDialog(RootShell.DeviceUser user) {
         if (user.id == 0) { showMessage("The owner profile name is managed by Android and cannot be changed here."); return; }
         EditText input = nameInput(user.name);
-        new AlertDialog.Builder(this).setTitle("Rename user")
+        AlertDialog.Builder builder = new AlertDialog.Builder(this).setTitle("Rename user")
                 .setView(dialogInput(input)).setNegativeButton("Cancel", null)
                 .setPositiveButton("Save", (d, w) -> {
                     String name = input.getText().toString().trim();
                     if (!validName(name)) { showMessage("Choose a name from 1 to 32 characters (letters, numbers, spaces, _ . or -)."); return; }
                     executeAction("Renaming user…", "pm rename-user " + user.id + " " + shellQuote(name), false);
-                }).show();
+                });
+        safeShowDialog(builder);
     }
 
     private void executeAction(String pendingMessage, String command, boolean switchAction) {
         if (actionRunning) { showMessage("An operation is already in progress."); return; }
         actionRunning = true;
-        Toast.makeText(this, pendingMessage, Toast.LENGTH_SHORT).show();
-        worker.execute(() -> {
+        if (showingUsers) renderUsers();
+        showMessage(pendingMessage);
+        runAsync(() -> {
             RootShell.Result result = runRoot(command, 25);
-            main.post(() -> {
+            postUi(() -> {
                 actionRunning = false;
-                if (isFinishing() || isDestroyed()) return;
+                if (showingUsers) renderUsers();
                 if (result.commandStarted && result.exitCode == 0 && !result.timedOut
-                        && !Pattern.compile("(?im)^\\s*(error:|failure|exception|java\\.)").matcher(result.output).find()) {
+                        && !RootShell.hasFailureLine(result.output)) {
                     if (switchAction) showMessage("Switch request sent to Android.");
                     else showMessage(successMessage(command, result.output));
                     refreshUsers(false);
@@ -302,7 +324,11 @@ public class MainActivity extends Activity {
                     // Let the user explicitly refresh if they want another command sent.
                 }
             });
-        });
+        }, t -> postUi(() -> {
+            actionRunning = false;
+            if (showingUsers) renderUsers();
+            showError("Could not complete action", cleanError(t.getMessage()));
+        }));
     }
 
     private String successMessage(String command, String output) {
@@ -322,20 +348,14 @@ public class MainActivity extends Activity {
         if (showingUsers) renderUsers();
         else if (homeUsersLabel != null) homeUsersLabel.setText(homeUsersSummary());
 
-        worker.execute(() -> {
-            // Run the requested operation immediately through su; no separate `id` preflight.
-            RootShell.Result list = runRoot("pm list users", 25);
-            RootShell.Result current = list.commandStarted && list.exitCode == 0 && !list.timedOut
-                    ? runRoot("am get-current-user", 25) : null;
-            List<DeviceUser> parsed = parseUsers(list.output);
-            int active = -1;
-            if (current != null && current.commandStarted && current.exitCode == 0 && !current.timedOut) {
-                Matcher m = Pattern.compile("(?m)^\\s*(\\d+)\\s*$").matcher(current.output);
-                if (m.find()) try { active = Integer.parseInt(m.group(1)); } catch (Exception ignored) {}
-            }
-            final int activeId = active;
-            main.post(() -> {
-                if (isFinishing() || isDestroyed()) return;
+        runAsync(() -> {
+            // Run the requested operation immediately through su in a single shell invocation.
+            RootShell.Result list = runRoot(
+                    "pm list users && { printf 'CURRENT_USER='; am get-current-user 2>/dev/null || true; }",
+                    25);
+            List<RootShell.DeviceUser> parsed = RootShell.parseUsers(list.output);
+            final int activeId = RootShell.parseCurrentUser(list.output, parsed);
+            postUi(() -> {
                 loadingUsers = false;
                 boolean listSucceeded = list.commandStarted && list.exitCode == 0 && !list.timedOut;
                 if (!listSucceeded) {
@@ -356,22 +376,42 @@ public class MainActivity extends Activity {
                 if (!listSucceeded && announce) showError("Unable to read users", usersLoadError);
                 else if (listSucceeded && announce) showMessage("User list refreshed.");
             });
-        });
+        }, t -> postUi(() -> {
+            loadingUsers = false;
+            usersLoaded = false;
+            usersLoadError = cleanError(t.getMessage());
+            if (showingUsers) renderUsers();
+            else if (homeUsersLabel != null) homeUsersLabel.setText(homeUsersSummary());
+            if (announce) showError("Unable to read users", usersLoadError);
+        }));
     }
 
-    private List<DeviceUser> parseUsers(String output) {
-        List<DeviceUser> result = new ArrayList<>();
-        Pattern pattern = Pattern.compile("UserInfo\\{(\\d+):([^}:]*)(?::[^}]*)?}([^\\n]*)");
-        Matcher matcher = pattern.matcher(output);
-        while (matcher.find()) {
-            try {
-                int id = Integer.parseInt(matcher.group(1));
-                String name = matcher.group(2).trim();
-                boolean running = matcher.group(3).toLowerCase(Locale.ROOT).contains("running");
-                result.add(new DeviceUser(id, name.isEmpty() ? (id == 0 ? "Owner" : "User " + id) : name, running));
-            } catch (Exception ignored) { }
+    private interface ErrorHandler {
+        void onError(Throwable t);
+    }
+
+    private void runAsync(Runnable task, ErrorHandler onError) {
+        if (isFinishing() || isDestroyed() || worker.isShutdown()) return;
+        try {
+            worker.execute(() -> {
+                try {
+                    task.run();
+                } catch (Throwable t) {
+                    if (onError != null) onError.onError(t);
+                }
+            });
+        } catch (Throwable t) {
+            if (onError != null) onError.onError(t);
         }
-        return result;
+    }
+
+    private void postUi(Runnable action) {
+        main.post(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            try {
+                action.run();
+            } catch (Throwable ignored) { }
+        });
     }
 
     private void buildPage() {
@@ -428,17 +468,48 @@ public class MainActivity extends Activity {
     private View dialogInput(EditText input) {
         LinearLayout wrap = new LinearLayout(this); wrap.setPadding(dp(24), dp(10), dp(24), dp(10)); wrap.addView(input, params(-1, 52)); return wrap;
     }
-    private boolean validName(String name) { return name.matches("[A-Za-z0-9 _.-]{1,32}") && !name.trim().isEmpty(); }
+    private boolean validName(String name) {
+        if (name == null) return false;
+        String trimmed = name.trim();
+        if (trimmed.isEmpty() || name.length() > 32) return false;
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '.' || c == '-';
+            if (!ok) return false;
+        }
+        return true;
+    }
     private String shellQuote(String value) { return "'" + value.replace("'", "'\\''") + "'"; }
-    private String initials(String name) { String clean = name.trim(); return clean.isEmpty() ? "U" : clean.substring(0, 1).toUpperCase(Locale.ROOT); }
+    private String initials(String name) {
+        String clean = name == null ? "" : name.trim();
+        return clean.isEmpty() ? "U" : clean.substring(0, 1).toUpperCase(Locale.ROOT);
+    }
     private String cleanError(String output) {
         String value = output == null ? "" : output.trim();
         if (value.isEmpty()) return "The command returned no output. Check the operation and try again.";
         if (value.length() > 280) value = value.substring(0, 280) + "…";
         return value;
     }
-    private void showMessage(String value) { Toast.makeText(this, value, Toast.LENGTH_LONG).show(); }
-    private void showError(String title, String message) { new AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton("OK", null).show(); }
+    private void showMessage(String value) {
+        if (isFinishing() || isDestroyed()) return;
+        try {
+            Toast.makeText(this, value, Toast.LENGTH_LONG).show();
+        } catch (Throwable ignored) { }
+    }
+    private void showError(String title, String message) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton("OK", null);
+        safeShowDialog(builder);
+    }
+    private void safeShowDialog(AlertDialog.Builder builder) {
+        if (isFinishing() || isDestroyed()) return;
+        try {
+            builder.show();
+        } catch (Throwable ignored) { }
+    }
     private int dp(float value) { return (int) (value * getResources().getDisplayMetrics().density + .5f); }
     private LinearLayout.LayoutParams params(int width, int height) { return new LinearLayout.LayoutParams(width < 0 ? width : dp(width), height < 0 ? height : dp(height)); }
 
@@ -455,11 +526,7 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        super.onDestroy(); worker.shutdownNow();
-    }
-
-    private static final class DeviceUser {
-        final int id; final String name; final boolean running;
-        DeviceUser(int id, String name, boolean running) { this.id = id; this.name = name; this.running = running; }
+        super.onDestroy();
+        try { worker.shutdownNow(); } catch (Throwable ignored) { }
     }
 }

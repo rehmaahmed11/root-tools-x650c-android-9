@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
@@ -25,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 final class RootShell {
     private static final String COMMAND_STARTED = "__ROOT_TOOLS_COMMAND_STARTED__";
     private static final int OUTPUT_LIMIT = 128 * 1024;
+    private static final int FLAG_GUEST = 0x4;
     private final String[] candidates;
 
     RootShell() {
@@ -47,6 +50,19 @@ final class RootShell {
         }
     }
 
+    static final class DeviceUser {
+        final int id;
+        final String name;
+        final boolean running;
+        final boolean guest;
+        DeviceUser(int id, String name, boolean running, boolean guest) {
+            this.id = id;
+            this.name = name;
+            this.running = running;
+            this.guest = guest;
+        }
+    }
+
     Result run(String command, int timeoutSeconds) {
         String script = buildScript(command);
         Process process = null;
@@ -64,7 +80,7 @@ final class RootShell {
                         .redirectErrorStream(true).start();
                 launched = i;
                 break;
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 launchErrors.append(candidates[i]).append(": ").append(e.getMessage()).append('\n');
             }
         }
@@ -79,10 +95,10 @@ final class RootShell {
             // only when the first attempt provably did not run anything (a usage
             // error and no command-start marker). The operation still executes at
             // most once.
-            Process legacy = null;
+            Process legacy;
             try {
                 legacy = new ProcessBuilder(candidates[launched]).redirectErrorStream(true).start();
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 return result;
             }
             Result retry = execute(legacy, script, timeoutSeconds, true);
@@ -129,7 +145,7 @@ final class RootShell {
                         if (remaining > 0) captured.write(buffer, 0, Math.min(count, remaining));
                     }
                 }
-            } catch (IOException ignored) { /* Process teardown closes the pipe. */ }
+            } catch (Throwable ignored) { /* Process teardown closes the pipe. */ }
         }, "root-output");
         reader.setDaemon(true);
         reader.start();
@@ -145,7 +161,7 @@ final class RootShell {
                              new OutputStreamWriter(child.getOutputStream(), StandardCharsets.UTF_8)) {
                     out.write(script);
                     out.flush();
-                } catch (IOException e) {
+                } catch (Throwable e) {
                     // su closed stdin (for example it rejected the request). Keep
                     // the reason so the UI can explain what happened.
                     writeFailure.set("Superuser shell closed: " + e.getMessage());
@@ -158,7 +174,7 @@ final class RootShell {
             // descriptor and gives any reader an immediate EOF.
             try {
                 process.getOutputStream().close();
-            } catch (IOException ignored) { }
+            } catch (Throwable ignored) { }
         }
 
         boolean timedOut = false;
@@ -173,22 +189,171 @@ final class RootShell {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             failure = "Root request cancelled.";
+        } catch (Throwable t) {
+            failure = t.getMessage() == null ? t.toString() : t.getMessage();
         } finally {
-            process.destroyForcibly();
+            try { process.destroyForcibly(); } catch (Throwable ignored) { }
             try { reader.join(1000); } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            try { process.getInputStream().close(); } catch (IOException ignored) { }
-            try { process.getOutputStream().close(); } catch (IOException ignored) { }
+            try { process.getOutputStream().close(); } catch (Throwable ignored) { }
         }
-        String output;
-        synchronized (captured) { output = new String(captured.toByteArray(), StandardCharsets.UTF_8); }
-        boolean commandStarted = java.util.regex.Pattern.compile("(?m)^" + COMMAND_STARTED + "\\r?$").matcher(output).find();
-        output = output.replaceAll("(?m)^" + COMMAND_STARTED + "\\r?\\n?", "").trim();
+        String rawOutput;
+        synchronized (captured) { rawOutput = new String(captured.toByteArray(), StandardCharsets.UTF_8); }
+        boolean[] markerFound = new boolean[]{false};
+        String output = stripMarker(rawOutput, markerFound);
+        boolean commandStarted = markerFound[0];
         if (failure.isEmpty() && writeFailure.get() != null) failure = writeFailure.get();
         if (!failure.isEmpty()) output += "\n" + failure;
         if (timedOut) output += "\nTimed out after " + timeoutSeconds
                 + " seconds. The operation may have started; refresh before retrying.";
         return new Result(output.trim(), exitCode, timedOut, commandStarted);
+    }
+
+    private static String stripMarker(String raw, boolean[] markerFound) {
+        if (raw == null || raw.isEmpty()) return "";
+        StringBuilder cleaned = new StringBuilder(raw.length());
+        int start = 0;
+        int len = raw.length();
+        while (start < len) {
+            int nl = raw.indexOf('\n', start);
+            int lineEnd = nl < 0 ? len : nl;
+            int contentEnd = (lineEnd > start && raw.charAt(lineEnd - 1) == '\r') ? lineEnd - 1 : lineEnd;
+            if (contentEnd - start == COMMAND_STARTED.length()
+                    && raw.regionMatches(start, COMMAND_STARTED, 0, COMMAND_STARTED.length())) {
+                markerFound[0] = true;
+            } else {
+                cleaned.append(raw, start, nl < 0 ? len : nl + 1);
+            }
+            if (nl < 0) break;
+            start = nl + 1;
+        }
+        return cleaned.toString().trim();
+    }
+
+    /**
+     * Parses {@code pm list users} output without regular expressions.
+     * Android's ICU regex engine rejects unescaped closing braces {@code }}
+     * with {@code PatternSyntaxException}, so direct string scanning is used.
+     */
+    static List<DeviceUser> parseUsers(String output) {
+        List<DeviceUser> result = new ArrayList<>();
+        if (output == null || output.isEmpty()) return result;
+        int searchFrom = 0;
+        final String prefix = "UserInfo{";
+        while (searchFrom < output.length()) {
+            int start = output.indexOf(prefix, searchFrom);
+            if (start < 0) break;
+            int contentStart = start + prefix.length();
+            int lineEnd = output.indexOf('\n', contentStart);
+            if (lineEnd < 0) lineEnd = output.length();
+            int closeBrace = output.indexOf('}', contentStart);
+            if (closeBrace < 0 || closeBrace > lineEnd) {
+                searchFrom = lineEnd + 1;
+                continue;
+            }
+            String inside = output.substring(contentStart, closeBrace);
+            String afterBrace = output.substring(closeBrace + 1, lineEnd);
+            searchFrom = lineEnd + 1;
+
+            int firstColon = inside.indexOf(':');
+            if (firstColon <= 0) continue;
+            String idPart = inside.substring(0, firstColon).trim();
+            int secondColon = inside.indexOf(':', firstColon + 1);
+            String rawName = (secondColon < 0
+                    ? inside.substring(firstColon + 1)
+                    : inside.substring(firstColon + 1, secondColon)).trim();
+            String flagsPart = secondColon < 0 ? "" : inside.substring(secondColon + 1).trim();
+            int thirdColon = flagsPart.indexOf(':');
+            if (thirdColon >= 0) flagsPart = flagsPart.substring(0, thirdColon).trim();
+
+            try {
+                int id = Integer.parseInt(idPart);
+                int flags = 0;
+                if (!flagsPart.isEmpty()) {
+                    try {
+                        flags = Integer.parseInt(flagsPart, 16);
+                    } catch (NumberFormatException ignored) { }
+                }
+                String name = rawName.isEmpty() ? (id == 0 ? "Owner" : "User " + id) : rawName;
+                boolean running = afterBrace.toLowerCase(Locale.ROOT).contains("running");
+                boolean guest = id != 0 && ("GuestUser".equalsIgnoreCase(name)
+                        || "Guest".equalsIgnoreCase(name)
+                        || (flags & FLAG_GUEST) != 0);
+                result.add(new DeviceUser(id, name, running, guest));
+            } catch (NumberFormatException ignored) { }
+        }
+        return result;
+    }
+
+    /**
+     * Extracts the active user ID from {@code CURRENT_USER=<id>} or a standalone numeric
+     * line, falling back to running user entries when {@code am get-current-user} is silent.
+     */
+    static int parseCurrentUser(String output, List<DeviceUser> users) {
+        if (output != null && !output.isEmpty()) {
+            final String tag = "CURRENT_USER=";
+            int idx = output.indexOf(tag);
+            if (idx >= 0) {
+                int pos = idx + tag.length();
+                while (pos < output.length() && (output.charAt(pos) == ' ' || output.charAt(pos) == '\t')) pos++;
+                int end = pos;
+                while (end < output.length() && Character.isDigit(output.charAt(end))) end++;
+                if (end > pos) {
+                    try { return Integer.parseInt(output.substring(pos, end)); } catch (NumberFormatException ignored) { }
+                }
+            }
+            int start = 0;
+            while (start < output.length()) {
+                int nl = output.indexOf('\n', start);
+                String line = (nl < 0 ? output.substring(start) : output.substring(start, nl)).trim();
+                if (!line.isEmpty()) {
+                    boolean allDigits = true;
+                    for (int i = 0; i < line.length(); i++) {
+                        if (!Character.isDigit(line.charAt(i))) { allDigits = false; break; }
+                    }
+                    if (allDigits) {
+                        try { return Integer.parseInt(line); } catch (NumberFormatException ignored) { }
+                    }
+                }
+                if (nl < 0) break;
+                start = nl + 1;
+            }
+        }
+        if (users != null) {
+            int runningNonOwner = -1;
+            boolean ownerRunning = false;
+            for (int i = 0; i < users.size(); i++) {
+                DeviceUser u = users.get(i);
+                if (u.running) {
+                    if (u.id == 0) ownerRunning = true;
+                    else runningNonOwner = u.id;
+                }
+            }
+            if (runningNonOwner >= 0) return runningNonOwner;
+            if (ownerRunning) return 0;
+        }
+        return -1;
+    }
+
+    /** Detects error/exception lines in command output without regular expressions. */
+    static boolean hasFailureLine(String output) {
+        if (output == null || output.isEmpty()) return false;
+        int start = 0;
+        while (start < output.length()) {
+            int nl = output.indexOf('\n', start);
+            String line = (nl < 0 ? output.substring(start) : output.substring(start, nl))
+                    .trim().toLowerCase(Locale.ROOT);
+            if (line.startsWith("error:")
+                    || line.startsWith("failure")
+                    || line.startsWith("exception")
+                    || line.startsWith("java.")
+                    || line.startsWith("cannot ")) {
+                return true;
+            }
+            if (nl < 0) break;
+            start = nl + 1;
+        }
+        return false;
     }
 }

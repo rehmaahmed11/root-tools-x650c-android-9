@@ -302,13 +302,16 @@ manual_build_apk() {
 
   pkg="$(sed -n "s/.*namespace *['\"]\([^'\"]*\)['\"].*/\1/p" app/build.gradle | head -1)"
   [ -n "$pkg" ] || pkg="com.example.usermanager"
-  log "manual: package $pkg"
+  local vcode vname
+  vcode="$(sed -n 's/.*versionCode *\([0-9][0-9]*\).*/\1/p' app/build.gradle | head -1)"
+  vname="$(sed -n "s/.*versionName *['\"]\([^'\"]*\)['\"].*/\1/p" app/build.gradle | head -1)"
+  [ -n "$vcode" ] || vcode="5"
+  [ -n "$vname" ] || vname="1.0.4"
+  log "manual: package $pkg (versionCode=$vcode versionName=$vname)"
 
   work="$REPO_ROOT/.manual-build"
   rm -rf "$work"; mkdir -p "$work/gen" "$work/classes" "$work/dex"
-  local javac_sources
-  javac_sources="$(find "$work/gen" -name '*.java' 2>/dev/null; find app/src/main/java -name '*.java' 2>/dev/null)"
-  if [ -z "$javac_sources" ]; then
+  if [ -z "$(find app/src/main/java -name '*.java' 2>/dev/null)" ]; then
     fail "manual: no Java sources found to compile"
     return 1
   fi
@@ -326,12 +329,12 @@ manual_build_apk() {
     "$bt/aapt2" link -o "$work/unsigned.apk" -I "$aj" \
       --manifest "$work/AndroidManifest.xml" --java "$work/gen" \
       --min-sdk-version 28 --target-sdk-version 28 \
-      --version-code 2 --version-name 1.0.1 \
+      --version-code "$vcode" --version-name "$vname" \
       --auto-add-overlay "$work/res.zip" &&
 
-    # shellcheck disable=SC2086
-    javac -encoding UTF-8 -classpath "$aj" -source 17 -target 17 \
-      -d "$work/classes" $javac_sources &&
+    # shellcheck disable=SC2046
+    javac -encoding UTF-8 -classpath "$aj" -source 8 -target 8 \
+      -d "$work/classes" $(find "$work/gen" app/src/main/java -name '*.java' 2>/dev/null) &&
 
     "$bt/d8" --release --lib "$aj" --min-api 28 \
       --output "$work/dex" $(find "$work/classes" -name '*.class') &&
