@@ -13,20 +13,44 @@ concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CI_GRADLE_VERSION: "8.9"
+  EXPECTED_APK: app/build/outputs/apk/debug/app-debug.apk
+  CI_LOG_DIR: .github-ci-logs
+
 jobs:
+  # ==========================================================================
+  # Link 1-5 of the CI tool chain:
+  #   environment -> unit tests -> build -> verify -> report
+  # Every step publishes its result as step outputs, and every later step
+  # consumes them, so a failure is always explained by the step before it.
+  # ==========================================================================
   build-debug-apk:
     name: Build debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      java_version: ${{ steps.toolchain.outputs.java_version }}
+      gradle_version: ${{ steps.toolchain.outputs.gradle_version }}
+      sdk_dir: ${{ steps.toolchain.outputs.sdk_dir }}
+      build_tools: ${{ steps.toolchain.outputs.build_tools }}
+      test_status: ${{ steps.tests.outputs.test_status }}
+      test_passed: ${{ steps.tests.outputs.test_passed }}
+      test_failed: ${{ steps.tests.outputs.test_failed }}
+      test_failure: ${{ steps.tests.outputs.test_failure }}
+      build_status: ${{ steps.build.outputs.build_status }}
+      build_mode: ${{ steps.build.outputs.build_mode }}
+      apk_sha256: ${{ steps.verify.outputs.apk_sha256 }}
+      apk_size_bytes: ${{ steps.verify.outputs.apk_size_bytes }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      # JDK layer: Temurin first, Zulu fallback. The build script itself can
-      # also fall back to any JDK 17 already present on the runner image.
+      # --- Link 1: Java 17 (Temurin first, Zulu fallback) -------------------
+      # The build script can also fall back to any JDK 17 already on the image.
       - name: Set up Java 17 (Temurin)
         id: java_primary
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -35,20 +59,32 @@ jobs:
 
       - name: Set up Java 17 (Zulu fallback)
         if: steps.java_primary.outcome == 'failure'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: zulu
           java-version: "17"
           java-package: jdk
         continue-on-error: true
 
+      # --- Link 2: probe the toolchain --------------------------------------
+      # Publishes java/gradle/sdk facts that every later step reuses.
+      - name: Probe toolchain
+        id: toolchain
+        run: bash .github/scripts/probe-toolchain.sh
+
+      # --- Link 3: host-side regression tests -------------------------------
+      # The tests are allowed to fail here so that the APK is still built and
+      # a full report is still produced. The gate at the end of the job turns
+      # a test failure into a red build without hiding the diagnostics.
       - name: Test root-shell grant, denial, output and timeout handling
+        id: tests
+        continue-on-error: true
         run: bash tests/run-root-shell-tests.sh
 
       # Speed layer only: a cache hit avoids re-downloading Gradle/deps.
       # Failures here can never break the build.
       - name: Cache Gradle distribution and dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/gradle-dist
@@ -57,50 +93,150 @@ jobs:
           restore-keys: android-apk-${{ runner.os }}-gradle8.9-
         continue-on-error: true
 
+      # --- Link 4: build the APK --------------------------------------------
       # Resilience layer: retries + mirrors for SDK/Gradle, 3 Gradle attempts,
       # and a network-free raw-SDK (aapt2/javac/d8/apksigner) fallback build.
       - name: Build APK (retries with layered fallbacks)
         id: build
-        env:
-          CI_GRADLE_VERSION: "8.9"
-          EXPECTED_APK: app/build/outputs/apk/debug/app-debug.apk
         run: bash .github/scripts/build-with-fallback.sh
 
+      # --- Link 5: verify the artifact -------------------------------------
       - name: Verify APK artifact
-        run: |
-          test -s app/build/outputs/apk/debug/app-debug.apk
-          ls -lh app/build/outputs/apk/debug/app-debug.apk
-          sha256sum app/build/outputs/apk/debug/app-debug.apk
+        id: verify
+        continue-on-error: true
+        run: bash .github/scripts/verify-apk.sh
 
       # Artifact layer: upload is retried with overwrite, so a transient
       # artifact-service hiccup cannot lose the APK.
       - name: Upload APK artifact
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: root-tools-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.EXPECTED_APK }}
           if-no-files-found: error
           retention-days: 14
         continue-on-error: true
 
       - name: Retry APK artifact upload
-        if: steps.upload.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        if: steps.upload.outcome == 'failure' && hashFiles(env.EXPECTED_APK) != ''
+        uses: actions/upload-artifact@v7
         with:
           name: root-tools-debug-apk
           overwrite: true
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.EXPECTED_APK }}
           if-no-files-found: error
           retention-days: 14
+        continue-on-error: true
+
+      # --- Link 6: report (always runs) ------------------------------------
+      # The report is produced no matter how the job ended, so every run
+      # leaves a readable and machine readable trace behind.
+      - name: Write CI report
+        if: always()
+        env:
+          OVERALL_STATUS: ${{ job.status }}
+        run: bash .github/scripts/ci-report.sh
+
+      - name: Upload CI report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-report-run
+          path: |
+            ${{ env.CI_LOG_DIR }}/ci-report.md
+            ${{ env.CI_LOG_DIR }}/ci-report.json
+            ${{ env.CI_LOG_DIR }}/ci-report.txt
+          if-no-files-found: warn
+          retention-days: 30
 
       # Last-resort layer: if something still failed, publish diagnostics so
       # every run always leaves an artifact behind to debug with.
       - name: Upload diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
           name: build-diagnostics
-          path: .github-ci-logs/
+          path: ${{ env.CI_LOG_DIR }}/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
+
+      # --- Gate: the build is red if the tests failed or no APK was made ---
+      - name: "Gate: tests must pass and an APK must exist"
+        if: always()
+        env:
+          TEST_STATUS: ${{ steps.tests.outputs.test_status }}
+          BUILD_STATUS: ${{ steps.build.outputs.build_status }}
+          APK_SHA256: ${{ steps.verify.outputs.apk_sha256 }}
+        run: |
+          status=0
+          if [ "$TEST_STATUS" != "passed" ]; then
+            echo "::error::Host-side root-shell regression tests did not pass (status: ${TEST_STATUS:-not run}). See the ci-report-run artifact."
+            status=1
+          fi
+          if [ "$BUILD_STATUS" != "succeeded" ]; then
+            echo "::error::The APK build did not succeed (status: ${BUILD_STATUS:-not run}). See the build-diagnostics artifact."
+            status=1
+          fi
+          if [ -z "$APK_SHA256" ]; then
+            echo "::error::No verified APK was produced."
+            status=1
+          fi
+          exit $status
+
+  # ==========================================================================
+  # Link 7: the report job. It runs even when the build job failed or was
+  # cancelled, so every workflow run ends with a readable verdict.
+  # ==========================================================================
+  ci-report:
+    name: CI report
+    needs: build-debug-apk
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download build diagnostics
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: build-diagnostics
+          path: ${{ env.CI_LOG_DIR }}
+
+      - name: Download APK artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: root-tools-debug-apk
+          path: ${{ env.CI_LOG_DIR }}/apk
+
+      - name: Assemble final CI report
+        env:
+          OVERALL_STATUS: ${{ needs.build-debug-apk.result }}
+          JAVA_VERSION: ${{ needs.build-debug-apk.outputs.java_version }}
+          GRADLE_VERSION: ${{ needs.build-debug-apk.outputs.gradle_version }}
+          SDK_DIR: ${{ needs.build-debug-apk.outputs.sdk_dir }}
+          BUILD_TOOLS: ${{ needs.build-debug-apk.outputs.build_tools }}
+          TEST_STATUS: ${{ needs.build-debug-apk.outputs.test_status }}
+          TEST_PASSED: ${{ needs.build-debug-apk.outputs.test_passed }}
+          TEST_FAILED: ${{ needs.build-debug-apk.outputs.test_failed }}
+          TEST_FAILURE: ${{ needs.build-debug-apk.outputs.test_failure }}
+          BUILD_STATUS: ${{ needs.build-debug-apk.outputs.build_status }}
+          BUILD_MODE: ${{ needs.build-debug-apk.outputs.build_mode }}
+          APK_SHA256: ${{ needs.build-debug-apk.outputs.apk_sha256 }}
+          APK_SIZE_BYTES: ${{ needs.build-debug-apk.outputs.apk_size_bytes }}
+        run: bash .github/scripts/ci-report.sh
+
+      - name: Upload final CI report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-report
+          path: |
+            ${{ env.CI_LOG_DIR }}/ci-report.md
+            ${{ env.CI_LOG_DIR }}/ci-report.json
+            ${{ env.CI_LOG_DIR }}/ci-report.txt
+          if-no-files-found: warn
+          retention-days: 30
