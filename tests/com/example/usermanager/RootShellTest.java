@@ -80,12 +80,12 @@ public final class RootShellTest {
         Path granted = fakeSu(dir, "granted", "id() { echo 0; }");
         RootShell shell = new RootShell(new String[]{granted.toString()});
         RootShell.Result result = shell.run("echo 'Success: created user id 10'", 3);
-        check(result.rootVerified && result.exitCode == 0 && !result.timedOut
-                && result.output.equals("Success: created user id 10"), "grant verifies UID and runs operation immediately");
+        check(result.commandStarted && result.exitCode == 0 && !result.timedOut
+                && result.output.equals("Success: created user id 10"), "the requested operation runs immediately through su");
 
         result = shell.run("echo failure >&2; exit 9", 3);
-        check(result.rootVerified && result.exitCode == 9 && result.output.contains("failure"),
-                "operation failure retains root status and stderr");
+        check(result.commandStarted && result.exitCode == 9 && result.output.contains("failure"),
+                "operation failure retains command-start status and stderr");
 
         result = shell.run("i=0; while [ $i -lt 15000 ]; do echo 01234567890123456789; i=$((i+1)); done", 5);
         check(result.exitCode == 0 && !result.timedOut && result.output.length() <= 128 * 1024,
@@ -95,31 +95,32 @@ public final class RootShellTest {
         Path replay = dir.resolve("replayed");
         Path trap = inertSu(dir, "trap", "touch '" + replay + "'; exit 1");
         result = new RootShell(new String[]{denied.toString(), trap.toString()}).run("echo unsafe", 3);
-        check(!result.rootVerified && result.exitCode != 0 && result.output.contains("Permission denied")
+        check(!result.commandStarted && result.exitCode != 0 && result.output.contains("Permission denied")
                 && !Files.exists(replay), "denial is diagnosed without retrying another su: " + result.output);
 
-        Path nonroot = fakeSu(dir, "nonroot", "id() { echo 2000; }");
+        Path idProbe = dir.resolve("id-probe");
+        Path nonroot = fakeSu(dir, "nonroot", "id() { echo 2000; echo checked >> '" + idProbe + "'; }");
         Path mutation = dir.resolve("mutation");
         result = new RootShell(new String[]{nonroot.toString()}).run("touch '" + mutation + "'", 3);
-        check(!result.rootVerified && result.exitCode == 77 && !Files.exists(mutation),
-                "nonzero UID blocks privileged operation");
+        check(result.commandStarted && result.exitCode == 0 && Files.exists(mutation) && !Files.exists(idProbe),
+                "the requested command runs directly without a separate id -u check");
 
         result = new RootShell(new String[]{dir.resolve("missing").toString(), granted.toString()}).run("echo fallback", 3);
-        check(result.rootVerified && result.exitCode == 0 && result.output.equals("fallback"),
+        check(result.commandStarted && result.exitCode == 0 && result.output.equals("fallback"),
                 "missing su executable falls back to next known path");
 
         result = new RootShell(new String[]{dir.resolve("missing").toString()}).run("id", 3);
-        check(!result.rootVerified && result.output.contains("Cannot start"), "missing root installation is explained");
+        check(!result.commandStarted && result.output.contains("Cannot start"), "missing root installation is explained");
 
         Path slow = inertSu(dir, "slow", "exec sleep 10");
         long start = System.nanoTime();
         result = new RootShell(new String[]{slow.toString()}).run("id", 1);
-        check(result.timedOut && !result.rootVerified && (System.nanoTime() - start) < 5000000000L,
+        check(result.timedOut && !result.commandStarted && (System.nanoTime() - start) < 5000000000L,
                 "unanswered approval times out without hanging");
 
         Path once = dir.resolve("once");
         result = shell.run("echo executed >> '" + once + "'; sleep 2", 1);
-        check(result.timedOut && result.rootVerified && Files.readAllLines(once).size() == 1,
+        check(result.timedOut && result.commandStarted && Files.readAllLines(once).size() == 1,
                 "timed-out operation is never replayed");
 
         // The modern `su -c` protocol is what real root managers expect, so the
@@ -128,7 +129,7 @@ public final class RootShellTest {
         Path recorder = fakeSu(dir, "recorder", "printf '%s' \"$1\" > '" + argvLog + "'\nid() { echo 0; }");
         result = new RootShell(new String[]{recorder.toString()}).run("echo protocol", 3);
         String argv = new String(Files.readAllBytes(argvLog), StandardCharsets.UTF_8);
-        check(result.rootVerified && "-c".equals(argv), "the modern su -c protocol is used");
+        check(result.commandStarted && "-c".equals(argv), "the modern su -c protocol is used");
 
         // A root manager whose su does not understand `-c` must still work: the
         // same binary is retried with the legacy stdin protocol.
@@ -143,7 +144,7 @@ public final class RootShellTest {
                 + "eval \"$(cat)\"\n").getBytes(StandardCharsets.UTF_8));
         if (!legacyOnly.toFile().setExecutable(true)) throw new AssertionError("Cannot make fake su executable");
         result = new RootShell(new String[]{legacyOnly.toString()}).run("echo legacy", 3);
-        check(result.rootVerified && result.exitCode == 0 && result.output.equals("legacy"),
+        check(result.commandStarted && result.exitCode == 0 && result.output.equals("legacy"),
                 "su without -c support falls back to the stdin protocol: " + result.output);
 
         // A su that rejects `-c` and also ignores stdin must fail fast and loudly
@@ -159,7 +160,7 @@ public final class RootShellTest {
         if (!rejectOnly.toFile().setExecutable(true)) throw new AssertionError("Cannot make fake su executable");
         start = System.nanoTime();
         result = new RootShell(new String[]{rejectOnly.toString()}).run("echo never", 3);
-        check(!result.rootVerified && result.exitCode != 0 && (System.nanoTime() - start) < 5000000000L,
+        check(!result.commandStarted && result.exitCode != 0 && (System.nanoTime() - start) < 5000000000L,
                 "a su that rejects -c and ignores stdin fails fast with a clear error: " + result.output);
 
         System.out.println(passed + " root-shell regression tests passed.");

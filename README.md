@@ -4,8 +4,8 @@ A native Android app focused initially on multi-user management for rooted devic
 
 ## Features
 
-- Requests and verifies a real UID 0 shell on launch and when returning from the root manager, with up to 60 seconds for approval. Never treats a saved permission flag as proof of root. After verification, it immediately loads users and shows a green confirmation.
-- Every privileged operation verifies UID 0 again in the same shell before executing. Output is drained concurrently to prevent pipe-buffer deadlocks; missing `su`, denials, and timeouts include diagnostic details. Commands are not automatically replayed after failures/timeouts.
+- Opens directly into the app without a startup root-check screen or `id` preflight. The interface opens immediately; `pm list users` is sent through `su` directly when Guest controls are opened.
+- Privileged operations run directly through `su`; their real exit codes and output determine success. Output is drained concurrently to prevent pipe-buffer deadlocks; missing `su`, denials, and timeouts include diagnostic details. Commands are not automatically replayed after failures/timeouts.
 - Lists Android device users and identifies the active profile when the system reports it.
 - Creates users, switches profiles, renames users, and removes users through Android's privileged `pm` and `am` commands.
 - Long-press a user (or tap its action menu) to see available actions. Deletion always requires confirmation; owner ID 0 cannot be renamed or deleted.
@@ -82,22 +82,21 @@ gradle :app:assembleDebug
 
 APK output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-## Root troubleshooting (1.0.3)
+## Root command troubleshooting
 
-Install the **newly built** APK (version 1.0.3 / code 4), not an older downloaded artifact. This release uses an explicit `su -c` request so Android root managers receive a per-app access request, and shows an immediate in-app toast while waiting.
-Open Root Tools, allow its prompt in Magisk/SuperSU/your installed root manager,
-and wait for **ROOT READY**. The user list loads automatically. Return to the app
-or tap the root badge / Check root to reverify after changing root-manager settings.
-An Android app-permissions toggle alone does not provide root; the phone must
-already have a functional `su` installation. No Android runtime permission can
-replace this.
+Root Tools opens without a separate startup root check or a **Check root** button.
+Opening Guest controls sends the real user-list command through `su` directly;
+the home screen does not request root. The Guest controls page also has a manual
+refresh. If the root manager asks for approval, that request is for the actual
+Android operation. The phone still needs a functional `su` installation—an
+Android app-permissions toggle cannot provide root access.
 
-If verification fails, the dialog reports the shell's actual error. If root is
-verified but a user operation fails, Android/vendor restrictions or unsupported
-commands may be responsible. Root approval alone does not guarantee multi-user
-support. After an operation times out, refresh the list before retrying: the
-system service may still finish it. Never retry a destructive operation blindly.
-If an update reports a signature mismatch (CI debug signing keys can change),
+A failed command reports its own output in Guest controls or in the action error
+dialog. Root approval alone does not guarantee multi-user support; Android/vendor
+restrictions or unsupported commands may still cause an operation to fail. After
+an operation times out, refresh the list before retrying because the system
+service may still finish it. Never retry a destructive operation blindly. If an
+update reports a signature mismatch (CI debug signing keys can change),
 uninstall the old Root Tools app and install the new APK; this clears app settings.
 
 ### Regression tests
@@ -109,12 +108,12 @@ bash tests/run-root-shell-tests.sh
 ```
 
 Tests use fake superuser executables; no real root or Android device is needed.
-They cover approval, non-root rejection, denial diagnostics, executable-path
-fallbacks, large output, exit codes, and timeouts without command replay. They
-also pin the `su` invocation contract: the suite asserts that the modern
-`su -c <script>` protocol is used, that a `su` without `-c` support still works
-through the legacy stdin protocol, and that a `su` rejecting both fails fast
-instead of hanging. CI runs them before building the APK.
+They cover direct command execution (without a separate UID probe), denial
+diagnostics, executable-path fallbacks, large output, exit codes, and timeouts
+without command replay. They also pin the `su` invocation contract: the suite
+asserts that the modern `su -c <script>` protocol is used, that a `su` without
+`-c` support still works through the legacy stdin protocol, and that a `su`
+rejecting both fails fast instead of hanging. CI runs them before building the APK.
 
 If `javac` is unavailable, set `ECJ_JAR` to an Eclipse compiler jar
 (`org.eclipse.jdt.internal.compiler.batch.Main`) to run the suite anyway.
