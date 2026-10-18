@@ -9,36 +9,95 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-debug-apk:
     name: Build debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      # JDK layer: Temurin first, Zulu fallback. The build script itself can
+      # also fall back to any JDK 17 already present on the runner image.
+      - name: Set up Java 17 (Temurin)
+        id: java_primary
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+          java-package: jdk
+        continue-on-error: true
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK platform
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Build debug APK
-        uses: gradle/gradle-build-action@v3
+      - name: Set up Java 17 (Zulu fallback)
+        if: steps.java_primary.outcome == 'failure'
+        uses: actions/setup-java@v4
         with:
-          gradle-version: "8.9"
-          arguments: :app:assembleDebug --stacktrace
+          distribution: zulu
+          java-version: "17"
+          java-package: jdk
+        continue-on-error: true
 
+      # Speed layer only: a cache hit avoids re-downloading Gradle/deps.
+      # Failures here can never break the build.
+      - name: Cache Gradle distribution and dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/gradle-dist
+            ~/.gradle/caches
+          key: android-apk-${{ runner.os }}-gradle8.9-${{ hashFiles('**/*.gradle', '**/gradle.properties') }}
+          restore-keys: android-apk-${{ runner.os }}-gradle8.9-
+        continue-on-error: true
+
+      # Resilience layer: retries + mirrors for SDK/Gradle, 3 Gradle attempts,
+      # and a network-free raw-SDK (aapt2/javac/d8/apksigner) fallback build.
+      - name: Build APK (retries with layered fallbacks)
+        id: build
+        env:
+          CI_GRADLE_VERSION: "8.9"
+          EXPECTED_APK: app/build/outputs/apk/debug/app-debug.apk
+        run: bash .github/scripts/build-with-fallback.sh
+
+      - name: Verify APK artifact
+        run: |
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+          sha256sum app/build/outputs/apk/debug/app-debug.apk
+
+      # Artifact layer: upload is retried with overwrite, so a transient
+      # artifact-service hiccup cannot lose the APK.
       - name: Upload APK artifact
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: root-tools-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+        continue-on-error: true
+
+      - name: Retry APK artifact upload
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: root-tools-debug-apk
+          overwrite: true
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      # Last-resort layer: if something still failed, publish diagnostics so
+      # every run always leaves an artifact behind to debug with.
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: .github-ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
