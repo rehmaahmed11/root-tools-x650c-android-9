@@ -272,7 +272,7 @@ manual_build_apk() {
     "$bt/aapt2" link -o "$work/unsigned.apk" -I "$aj" \
       --manifest "$work/AndroidManifest.xml" --java "$work/gen" \
       --min-sdk-version 28 --target-sdk-version 28 \
-      --version-code 1 --version-name 1.0.0 \
+      --version-code 2 --version-name 1.0.1 \
       --auto-add-overlay "$work/res.zip" &&
 
     javac -encoding UTF-8 -classpath "$aj" -source 17 -target 17 \

@@ -42,6 +42,9 @@ jobs:
           java-package: jdk
         continue-on-error: true
 
+      - name: Test root-shell grant, denial, output and timeout handling
+        run: bash tests/run-root-shell-tests.sh
+
       # Speed layer only: a cache hit avoids re-downloading Gradle/deps.
       # Failures here can never break the build.
       - name: Cache Gradle distribution and dependencies

@@ -23,14 +23,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,7 +39,10 @@ public class MainActivity extends Activity {
     private static final int BG = Color.rgb(245, 248, 246);
     private static final int CARD = Color.WHITE;
     private static final int LINE = Color.rgb(230, 237, 232);
-    private static final String ROOT_OK = "root_granted";
+    private final RootShell rootShell = new RootShell();
+    private boolean checkingRoot;
+    private boolean wasPaused;
+    private boolean actionRunning;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -61,42 +61,53 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-        rootReady = getPreferences(MODE_PRIVATE).getBoolean(ROOT_OK, false);
+        rootReady = false; // A previous grant is not evidence of a live root shell.
         renderHome();
-        if (rootReady) {
-            updateRootBadge("ROOT READY", true, false);
-            refreshUsers(false);
-        } else {
-            updateRootBadge("CHECKING ROOT", false, true);
-            checkRootFirstTime();
-        }
+        retryRoot();
     }
 
     private void checkRootFirstTime() {
+        if (checkingRoot || isFinishing() || isDestroyed()) return;
+        checkingRoot = true;
+        rootReady = false;
+        if (showingUsers) renderUsers(); else renderHome();
+        updateRootBadge("CHECKING ROOT", false, true);
         worker.execute(() -> {
-            RootResult result = runRoot("id", 25);
-            boolean ok = result.exitCode == 0 && result.output.contains("uid=0");
+            RootShell.Result result = runRoot("id", 60);
+            boolean ok = result.exitCode == 0 && result.rootVerified && !result.timedOut;
             main.post(() -> {
-                if (isFinishing()) return;
+                if (isFinishing() || isDestroyed()) return;
+                checkingRoot = false;
+                rootReady = ok;
+                if (!ok) { users.clear(); currentUser = -1; }
+                if (showingUsers) renderUsers(); else renderHome();
                 if (ok) {
-                    rootReady = true;
-                    getPreferences(MODE_PRIVATE).edit().putBoolean(ROOT_OK, true).apply();
-                    renderHome();
                     showRootPass();
                     refreshUsers(false);
                 } else {
                     updateRootBadge(result.timedOut ? "ROOT TIMEOUT" : "ROOT NEEDED", false, false);
-                    showMessage(result.timedOut
-                            ? "Root approval took too long. Tap Check root to try again."
-                            : "Root access was not granted. Tap Check root when you are ready.");
+                    showError("Root access unavailable", cleanError(result.output)
+                            + "\n\nIn your root manager, check access for Root Tools (com.example.usermanager), then return here or tap Check root. Allowing permission cannot root an unrooted device.");
                 }
             });
         });
     }
 
     private void retryRoot() {
-        updateRootBadge("CHECKING ROOT", false, true);
         checkRootFirstTime();
+    }
+
+    @Override protected void onPause() {
+        super.onPause();
+        wasPaused = true;
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (wasPaused) {
+            wasPaused = false;
+            retryRoot();
+        }
     }
 
     private void renderHome() {
@@ -104,7 +115,7 @@ public class MainActivity extends Activity {
         buildPage();
         addToolbar();
         addSpacer(34);
-        addLabel("ROOTED AND READY", 11, GREEN, true, 2);
+        addLabel(rootReady ? "ROOTED AND READY" : "ROOT ACCESS REQUIRED", 11, GREEN, true, 2);
         addText("Your device,\nyour space.", 34, INK, true, 0);
         addText("A simple home for powerful Android tools.", 15, MUTED, false, 12);
 
@@ -117,16 +128,16 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams htp = params(-1, -2); htp.topMargin = dp(8); hero.addView(heroTitle, htp);
         TextView heroInfo = text(rootReady
                 ? "Superuser permission is available for this session."
-                : "We’ll request superuser access the first time it’s needed. Allow the prompt within 25 seconds.",
+                : "Allow Root Tools in your root manager. We verify a real root shell before enabling tools (up to 60 seconds).",
                 14, Color.rgb(211, 226, 217), false);
         heroInfo.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams hip = params(-1, -2); hip.topMargin = dp(6); hero.addView(heroInfo, hip);
         LinearLayout status = new LinearLayout(this); status.setGravity(Gravity.CENTER_VERTICAL);
         if (rootProgress != null && rootProgress.getParent() != null) ((ViewGroup) rootProgress.getParent()).removeView(rootProgress);
         rootProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
-        rootProgress.setIndeterminate(true); rootProgress.setVisibility(rootReady ? View.GONE : View.VISIBLE);
+        rootProgress.setIndeterminate(true); rootProgress.setVisibility(checkingRoot ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams rp = params(18, 18); rp.topMargin = dp(17); status.addView(rootProgress, rp);
-        TextView inlineStatus = text(rootReady ? "Superuser enabled" : "Waiting for superuser response", 12,
+        TextView inlineStatus = text(rootReady ? "Superuser enabled" : checkingRoot ? "Waiting for superuser response" : "Root not verified — tap Check root", 12,
                 Color.rgb(212, 231, 218), true);
         LinearLayout.LayoutParams isp = params(-2, -2); isp.leftMargin = dp(9); isp.topMargin = dp(17); status.addView(inlineStatus, isp);
         hero.addView(status);
@@ -293,13 +304,24 @@ public class MainActivity extends Activity {
     }
 
     private void executeAction(String pendingMessage, String command, boolean switchAction) {
-        if (!rootReady) { showMessage("Root access is required. Tap Check root on the home screen first."); return; }
+        if (actionRunning) { showMessage("An operation is already in progress."); return; }
+        if (checkingRoot) { showMessage("Please wait for root verification."); return; }
+        if (!rootReady) { retryRoot(); return; }
+        actionRunning = true;
         Toast.makeText(this, pendingMessage, Toast.LENGTH_SHORT).show();
         worker.execute(() -> {
-            RootResult result = runRoot(command, 25);
+            RootShell.Result result = runRoot(command, 25);
             main.post(() -> {
-                if (isFinishing()) return;
-                if (result.exitCode == 0 && !result.timedOut) {
+                actionRunning = false;
+                if (isFinishing() || isDestroyed()) return;
+                if (!result.rootVerified) {
+                    rootReady = false;
+                    users.clear();
+                    currentUser = -1;
+                    if (showingUsers) renderUsers(); else renderHome();
+                }
+                if (result.rootVerified && result.exitCode == 0 && !result.timedOut
+                        && !Pattern.compile("(?im)^\\s*(error:|failure|exception|java\\.)").matcher(result.output).find()) {
                     if (switchAction) {
                         showMessage("Switch request sent to Android.");
                         refreshUsers(false);
@@ -308,7 +330,7 @@ public class MainActivity extends Activity {
                         refreshUsers(false);
                     }
                 } else {
-                    String reason = result.timedOut ? "The root command timed out after 25 seconds."
+                    String reason = result.timedOut ? "The command timed out. Refresh before retrying: Android may still complete it."
                             : cleanError(result.output);
                     showError("Could not complete action", reason);
                     refreshUsers(false);
@@ -325,18 +347,23 @@ public class MainActivity extends Activity {
     }
 
     private void refreshUsers(boolean announce) {
+        if (checkingRoot) return;
         if (!rootReady) { if (announce) retryRoot(); return; }
         worker.execute(() -> {
-            RootResult list = runRoot("pm list users", 25);
-            RootResult current = runRoot("am get-current-user", 25);
+            RootShell.Result list = runRoot("pm list users", 25);
+            RootShell.Result current = runRoot("am get-current-user", 25);
             List<DeviceUser> parsed = parseUsers(list.output);
             int active = -1;
             Matcher m = Pattern.compile("(?m)^\\s*(\\d+)\\s*$").matcher(current.output);
             if (m.find()) try { active = Integer.parseInt(m.group(1)); } catch (Exception ignored) {}
             final int activeId = active;
             main.post(() -> {
-                if (isFinishing()) return;
-                if (list.exitCode != 0) {
+                if (isFinishing() || isDestroyed()) return;
+                if (!list.rootVerified || list.exitCode != 0 || list.timedOut) {
+                    if (!list.rootVerified) {
+                        rootReady = false; users.clear(); currentUser = -1;
+                        if (showingUsers) renderUsers(); else renderHome();
+                    }
                     if (parsed.isEmpty()) showError("Unable to read users", cleanError(list.output));
                     return;
                 }
@@ -407,9 +434,9 @@ public class MainActivity extends Activity {
         TextView appName = text("ROOT TOOLS", 13, INK, true);
         LinearLayout.LayoutParams an = new LinearLayout.LayoutParams(0, -2, 1); an.leftMargin = dp(10); bar.addView(appName, an);
         rootBadge = text("", 10, GREEN, true); rootBadge.setPadding(dp(11), dp(8), dp(11), dp(8));
-        bar.addView(rootBadge); updateRootBadge(rootReady ? "ROOT READY" : "ROOT NEEDED", rootReady, false);
+        bar.addView(rootBadge); updateRootBadge(rootReady ? "ROOT READY" : checkingRoot ? "CHECKING ROOT" : "ROOT NEEDED", rootReady, checkingRoot);
         page.addView(bar, params(-1, 46));
-        rootBadge.setOnClickListener(v -> { if (!rootReady) retryRoot(); else showMessage("Root access is enabled."); });
+        rootBadge.setOnClickListener(v -> retryRoot());
     }
 
     private void addFooter() {
@@ -469,25 +496,8 @@ public class MainActivity extends Activity {
         return new android.graphics.drawable.RippleDrawable(color, base, null);
     }
 
-    private RootResult runRoot(String command, int timeoutSeconds) {
-        Process process = null;
-        try {
-            process = new ProcessBuilder("su", "-c", command).redirectErrorStream(true).start();
-            boolean ended = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            if (!ended) {
-                process.destroy();
-                if (!process.waitFor(300, TimeUnit.MILLISECONDS)) process.destroyForcibly();
-                return new RootResult("", -1, true);
-            }
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                String line; while ((line = reader.readLine()) != null) output.append(line).append('\n');
-            }
-            return new RootResult(output.toString(), process.exitValue(), false);
-        } catch (Exception e) {
-            if (process != null) process.destroyForcibly();
-            return new RootResult(e.getMessage() == null ? "Unable to start su" : e.getMessage(), -1, false);
-        }
+    private RootShell.Result runRoot(String command, int timeoutSeconds) {
+        return rootShell.run(command, timeoutSeconds);
     }
 
     @Override protected void onDestroy() {
@@ -497,9 +507,5 @@ public class MainActivity extends Activity {
     private static final class DeviceUser {
         final int id; final String name; final boolean running;
         DeviceUser(int id, String name, boolean running) { this.id = id; this.name = name; this.running = running; }
-    }
-    private static final class RootResult {
-        final String output; final int exitCode; final boolean timedOut;
-        RootResult(String output, int exitCode, boolean timedOut) { this.output = output; this.exitCode = exitCode; this.timedOut = timedOut; }
     }
 }

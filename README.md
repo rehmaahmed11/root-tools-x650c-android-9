@@ -4,7 +4,8 @@ A native Android app focused initially on multi-user management for rooted devic
 
 ## Features
 
-- Checks superuser access when first needed, with a maximum 25-second wait for the root manager to respond. On success, it remembers that root has previously been granted and shows a brief green confirmation.
+- Requests and verifies a real UID 0 shell on launch and when returning from the root manager, with up to 60 seconds for approval. Never treats a saved permission flag as proof of root. After verification, it immediately loads users and shows a green confirmation.
+- Every privileged operation verifies UID 0 again in the same shell before executing. Output is drained concurrently to prevent pipe-buffer deadlocks; missing `su`, denials, and timeouts include diagnostic details. Commands are not automatically replayed after failures/timeouts.
 - Lists Android device users and identifies the active profile when the system reports it.
 - Creates users, switches profiles, renames users, and removes users through Android's privileged `pm` and `am` commands.
 - Long-press a user (or tap its action menu) to see available actions. Deletion always requires confirmation; owner ID 0 cannot be renamed or deleted.
@@ -33,3 +34,35 @@ gradle :app:assembleDebug
 ```
 
 APK output: `app/build/outputs/apk/debug/app-debug.apk`.
+
+## Root troubleshooting (1.0.1)
+
+Install the **newly built** APK (version 1.0.1 / code 2), not an older downloaded artifact.
+Open Root Tools, allow its prompt in Magisk/SuperSU/your installed root manager,
+and wait for **ROOT READY**. The user list loads automatically. Return to the app
+or tap the root badge / Check root to reverify after changing root-manager settings.
+An Android app-permissions toggle alone does not provide root; the phone must
+already have a functional `su` installation. No Android runtime permission can
+replace this.
+
+If verification fails, the dialog reports the shell's actual error. If root is
+verified but a user operation fails, Android/vendor restrictions or unsupported
+commands may be responsible. Root approval alone does not guarantee multi-user
+support. After an operation times out, refresh the list before retrying: the
+system service may still finish it. Never retry a destructive operation blindly.
+If an update reports a signature mismatch (CI debug signing keys can change),
+uninstall the old Root Tools app and install the new APK; this clears app settings.
+
+### Regression tests
+
+With JDK 17 or newer on Linux/macOS:
+
+```sh
+bash tests/run-root-shell-tests.sh
+```
+
+Tests use fake superuser executables; no real root or Android device is needed.
+They cover approval, non-root rejection, denial diagnostics, executable-path
+fallbacks, large output, exit codes, and timeouts without command replay. CI runs
+them before building the APK. A physical rooted-device test is still required to
+validate device-specific root managers, SELinux policy, and user-management support.

@@ -1,0 +1,5 @@
+.gradle/
+**/build/
+local.properties
+.github-ci-logs/
+*.apk
