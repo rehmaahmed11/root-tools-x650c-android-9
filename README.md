@@ -1,123 +1,105 @@
-# Root Tools
+# Guest Guard — Magisk User Manager
 
-A native Android app focused initially on multi-user management for rooted devices (Android 9 / API 28 and newer).
+A clean rebuild of this repository as a **Magisk module with a bundled native Android GUI**. It uses your existing Magisk root; it is not a rooting tool. The old app, Gradle project and fallback-build stack have been removed. The existing GitHub Actions workflow location is retained and now builds a flashable module ZIP.
 
-## Features
+**Android 9 / API 28+, Magisk 24+, owner user 0.** Designed with the Infinix X650C / Android 9 use case in mind, but not yet tested on that physical device. OEM user-management commands and SELinux policies can differ. No device-specific support is promised before testing.
 
-- Opens directly into the app without a startup root-check screen or `id` preflight. The interface opens immediately; `pm list users` is sent through `su` directly when Guest controls are opened.
-- Privileged operations run directly through `su`; their real exit codes and output determine success. Output is drained concurrently to prevent pipe-buffer deadlocks; missing `su`, denials, and timeouts include diagnostic details. Commands are not automatically replayed after failures/timeouts.
-- Lists Android device users and identifies the active profile when the system reports it.
-- Creates users, switches profiles, renames users, and removes users through Android's privileged `pm` and `am` commands.
-- Long-press a user (or tap its action menu) to see available actions. Deletion always requires confirmation; owner ID 0 cannot be renamed or deleted.
-- Root commands are run off the UI thread and user-provided names are validated and shell-quoted.
+## Install the ZIP
 
-Root access must be granted by the device's installed superuser manager. User switching and user-management support vary by Android build and device vendor. Removing a user permanently erases its data. This project does not include an APK binary; the GitHub Actions workflow builds a debug APK and uploads it as the `root-tools-debug-apk` artifact on each push, pull request, or manual run.
+1. Back up important files and make sure you know your owner lock-screen PIN.
+2. In **Magisk → Modules → Install from storage**, select `GuestGuard-v2.0.0.zip`.
+3. Reboot normally. A late-start service installs the bundled **Guest Guard** app for owner user 0 once Android finishes booting.
+4. Open **Guest Guard** in your app launcher, or tap the module's **Action** button in a Magisk version that supports module Actions.
+5. Tap **Connect & load users**, then grant Guest Guard root in **Magisk → Superuser**.
 
-## CI
+The app is **inside the module ZIP**; no separate WebUI, browser, Internet permission or extra manager is needed. Magisk controls its own module options layout; this module supplies `action.sh` to open the full app, not a custom embedded menu inside Magisk. If your Magisk version has no Action button, use the launcher.
 
-The `Build Android APK` workflow is a **chained tool pipeline**. Every stage
-publishes its result as step outputs, and every later stage consumes them, so a
-failure is always explained by the stage before it.
+**GitHub Actions:** download the `GuestGuard-v2.0.0-Magisk` artifact, extract the artifact wrapper, and flash the **inner** `GuestGuard-v2.0.0.zip`. A GitHub source ZIP is **not** a flashable module. Build outputs are intentionally not committed to Git.
 
-| # | Stage | Script | Publishes |
-|---|---|---|---|
-| 1 | Environment probe | `.github/scripts/probe-toolchain.sh` | `java_version`, `gradle_version`, `sdk_dir`, `build_tools` |
-| 2 | Host-side regression tests | `tests/run-root-shell-tests.sh` | `test_status`, `test_passed`, `test_failed`, `test_failure` |
-| 3 | APK build (layered fallbacks) | `.github/scripts/build-with-fallback.sh` | `build_status`, `build_mode`, `apk_sha256`, `apk_size_bytes` |
-| 4 | Artifact verification | `.github/scripts/verify-apk.sh` | `apk_sha256`, `apk_size_bytes`, `apk_verified` |
-| 5 | CI report | `.github/scripts/ci-report.sh` | `ci-report.md` / `.json` / `.txt` + job summary |
-| 6 | Report job (always runs) | `.github/scripts/ci-report.sh` | `ci-report` artifact |
+## What's in the GUI
 
-The build stage itself is still layered, so a run essentially cannot fail
-without producing the APK:
-
-1. Uses the Android SDK preinstalled on GitHub runners (no flaky SDK setup action); missing SDK packages are only fetched if absent, with retries.
-2. Provisions Gradle 8.9 from cache, the repo wrapper, a compatible preinstalled Gradle, or three download mirrors with zip-integrity checks.
-3. Retries the Gradle build up to 3 times (daemon reset + dependency refresh between attempts).
-4. If Gradle is unusable for any reason, assembles and signs the same APK directly with raw SDK tools (`aapt2` / `javac` / `d8` / `zipalign` / `apksigner`) — a network-free path on GitHub runners.
-5. Always uploads `root-tools-debug-apk` (with an upload retry); if anything still fails, a `build-diagnostics` artifact is published with the build logs.
-
-The build engine lives in `.github/scripts/build-with-fallback.sh` and exits non-zero only if no APK could be produced at all.
-
-### Reading the CI report
-
-Every run — successful or not — leaves a report behind. Download it with:
-
-```sh
-gh run download <run-id> --name ci-report        # final consolidated report
-gh run download <run-id> --name ci-report-run    # report written by the build job
-gh run download <run-id> --name build-diagnostics --dir logs   # raw logs
-```
-
-| File | Purpose |
+| Screen | Details and controls |
 |---|---|
-| `ci-report.md` | Human readable: verdict, tool chain table, artifact facts, extracted test/build/SDK evidence and a **What to do next** section. The same content is rendered in the run's job summary. |
-| `ci-report.json` | The same facts as a single machine readable object — the easiest thing to parse when planning the next change. |
-| `ci-report.txt` | The same facts without markup. |
+| Overview | Current user name and ID, total existing accounts, verified guests, protected accounts, Android-reported maximum, nominal remaining capacity, Android version, data-volume free space, read-only `fw.max_users` value |
+| Users | All accounts returned by Android, active marker, owner/guest/protected classification, raw Android flags, switch to owner/guest/regular full users, create guest, confirmed guest deletion |
+| Safety | Safeguards, compatibility information, recovery guidance, and a shortcut to Android's own user settings |
+| Diagnostics | Root/command errors, live refresh and copyable status report that omits account names |
 
-The report names the exact stage that failed and quotes the relevant log
-lines, so the next iteration can be planned from evidence instead of guesswork.
+Regular full users can be switched to but never deleted or renamed. Managed/work profiles remain read-only. Guest creation does **not** automatically switch sessions. Save work before switching and unlock the target user normally; the module cannot bypass PINs or encryption.
 
-### Guardrails against repeat failures
+### Capacity is honest, not “unlimited”
 
-- The runner image is pinned to `ubuntu-24.04` so the scheduled
-  `ubuntu-latest` image change cannot break a build unnoticed.
-- Actions are pinned to their Node 24 majors (`checkout@v7`, `setup-java@v6`,
-  `cache@v6`, `upload-artifact@v7`, `download-artifact@v8`).
-- A failing test suite no longer aborts the build: the APK is still produced
-  and the report is still written. A **gate** step at the end of the job turns
-  the test failure into a red build, so nothing is silently swallowed.
-- The test runner has a hard timeout, so a hanging fake `su` can never burn
-  the whole job budget.
-- The root-shell test fixtures speak both `su` protocols, so a change to the
-  invocation convention cannot silently invalidate the suite.
+- The primary limit comes from `pm get-max-users`, not a guessed constant. Unsupported or invalid responses show **unknown**.
+- Counts cover the `UserInfo` records Android returns. Nominal free slots are `max(0, reported maximum − listed accounts)`.
+- This is informational, **not a promise of how many guests you can create**. Android counts profiles, removing accounts, guests and full users differently. Storage, administrator restrictions and OEM policy also affect creation.
+- Many Android 9 ROMs permit only **one guest** at a time, independently of their full-user maximum. This module reports a rejected creation with Android's actual error and never falls back to a regular user.
+- **Unlimited users are not supported.** Setting a huge `fw.max_users` value cannot guarantee unlimited accounts and can destabilize low-memory devices. This module does not change limits or enable unsupported multi-user features.
 
-## Build locally
+## Deletion protection
 
-With JDK 17, Android SDK platform 35, and Gradle 8.9 installed:
+Checks run in both the GUI and a root backend that re-reads Android's state immediately before acting:
 
-```sh
-gradle :app:assembleDebug
+- **User ID 0 is never a deletion target**, regardless of its name or flags.
+- Only nonzero users with Android's **guest bit (`0x4`)** are eligible.
+- Primary, administrator, restricted, managed-profile, system, profile and main flags override the guest bit: conflicting types remain protected.
+- Missing, malformed or duplicate user records block changes. User type is never inferred from a name such as “Guest”.
+- Creation and deletion require the current owner session. The active guest cannot be deleted.
+- Each deletion requires typing `DELETE-GUEST-ID`. Deletion permanently erases that guest's apps and data.
+- No bulk deletion, regular-user creation, owner rename, credential reset, automatic guest expiry or automatic user switching.
+- Mutations are serialized using a root-owned `/dev/.guestguard-operation` directory. Read-only refresh is still available. Reboot clears an interrupted lock.
+- Commands have bounded output and a 60-second app-side wait. Failed/timed-out operations are **never replayed automatically**. Android may still complete an operation after the app stops waiting; refresh before deciding what to do next.
+
+These guarantees apply to **this module's operations**, not to Android Settings, other root apps, an administrator or someone manually running `pm remove-user`. The external Settings screen has its own controls. Do not run simultaneous user changes from other tools: Android's shell API does not provide an atomic “remove only if guest” transaction.
+
+## Safe defaults and recommended additions
+
+Included: typed confirmation, guest-only operations, owner-session restriction, no bulk delete, storage visibility, root diagnostics, no boot-time user changes, and an owner-return reminder.
+
+Deliberately excluded: fake unlimited capacity, forced enabling of unsupported multi-user mode, automatic data erasure, modifications to `/data/system/users`, SELinux changes, `system.prop`, boot-image patches and network root-command servers.
+
+A future optional feature could be **guest reminders** (notify, never auto-delete). Test normal switching and one disposable guest on the actual device before considering additional operations.
+
+## Troubleshooting and removal
+
+- **No app after reboot:** boot as owner, allow Android to finish starting, then tap Magisk's module Action. Installation diagnostics are in `/data/adb/guestguard/install.log` (root-only). `build/companion.apk` is also available as a CI artifact for manual owner-side installation.
+- **Root denied:** grant `dev.guestguard` / Guest Guard in Magisk Superuser, then refresh. This app cannot grant root to itself.
+- **Backend missing/disabled:** install the built module ZIP and reboot. A standalone APK is not a replacement for the module.
+- **Create rejected:** read the actual Android error. No regular user or limit tweak is attempted. If the only guest is active, return to owner, back up the guest and delete it explicitly before creating a replacement.
+- **Switching unsupported:** use the stock user switcher if available. Some OEM builds disable multi-user entirely; this module intentionally does not force-enable it.
+- **Interrupted request / stale lock:** refresh first. Reboot if new changes remain blocked. No operation is resumed automatically.
+- **Signing mismatch on update:** never auto-uninstall. Local builds reuse `.signing/development.jks`; ordinary CI runs generate new development keys. Keep a stable private keystore for your own builds using `KEYSTORE`, `KEY_ALIAS` and `KEY_PASS`. If manually uninstalling a mismatched companion, only app settings/root approval are reset; **Android users are not removed**. Reinstall the bundled app afterward. Old `com.example.usermanager` apps are not removed automatically; uninstall the obsolete Root Tools app yourself.
+- **Remove:** uninstall the module from Magisk and reboot, then uninstall Guest Guard from owner Settings if desired. No Android user is deleted. The small root-only install log may remain in `/data/adb/guestguard`.
+
+## Source layout
+
+```text
+module/                  Magisk metadata, installer, Action, service, root backend
+companion/               dependency-free native Android Java GUI and icon
+scripts/build.sh         compile, dex, sign, verify, package
+scripts/package.py       deterministic ZIP layout and permission checks
+tests/test_backend.py   fake Android command safety tests (no real device needed)
+.github/workflows/android-apk.yml  preserved workflow location, rebuilt module job
 ```
 
-APK output: `app/build/outputs/apk/debug/app-debug.apk`.
+## Build and test
 
-## Root command troubleshooting
-
-Root Tools opens without a separate startup root check or a **Check root** button.
-Opening Guest controls sends the real user-list command through `su` directly;
-the home screen does not request root. The Guest controls page also has a manual
-refresh. If the root manager asks for approval, that request is for the actual
-Android operation. The phone still needs a functional `su` installation—an
-Android app-permissions toggle cannot provide root access.
-
-A failed command reports its own output in Guest controls or in the action error
-dialog. Root approval alone does not guarantee multi-user support; Android/vendor
-restrictions or unsupported commands may still cause an operation to fail. After
-an operation times out, refresh the list before retrying because the system
-service may still finish it. Never retry a destructive operation blindly. If an
-update reports a signature mismatch (CI debug signing keys can change),
-uninstall the old Root Tools app and install the new APK; this clears app settings.
-
-### Regression tests
-
-With JDK 17 or newer on Linux/macOS:
+With JDK 17, Python 3, `zip`, Android SDK platform 35 and build-tools 35.0.0:
 
 ```sh
-bash tests/run-root-shell-tests.sh
+export ANDROID_SDK_ROOT=/path/to/android-sdk
+python3 -m unittest discover -s tests -v
+bash tests/run-companion-tests.sh
+bash scripts/build.sh
 ```
 
-Tests use fake superuser executables; no real root or Android device is needed.
-They cover direct command execution (without a separate UID probe), denial
-diagnostics, executable-path fallbacks, large output, exit codes, timeouts
-without command replay, regex-free `pm list users` and active-user parsing,
-and error-line detection. They also pin the `su` invocation contract: the suite
-asserts that the modern `su -c <script>` protocol is used, that a `su` without
-`-c` support still works through the legacy stdin protocol, and that a `su`
-rejecting both fails fast instead of hanging. CI runs them before building the APK.
+Outputs:
 
-If `javac` is unavailable, set `ECJ_JAR` to an Eclipse compiler jar
-(`org.eclipse.jdt.internal.compiler.batch.Main`) to run the suite anyway.
+- `dist/GuestGuard-v2.0.0.zip` — **flash this** in Magisk.
+- `dist/GuestGuard-v2.0.0.zip.sha256` — integrity checksum.
+- `build/companion.apk` — signed GUI bundled inside the ZIP.
 
-A physical rooted-device test is still required to validate device-specific
-root managers, SELinux policy, and user-management support.
+The backend explicitly uses Magisk’s bundled BusyBox `awk` because Android 9 may not include a system `awk`.
+
+The build uses SDK `aapt2`, `javac`, `d8` and `apksigner` directly, without Gradle or external app libraries. Advanced/offline environments can override `JAVA`, `JAVAC`, `KEYTOOL`, `AAPT2`, `ANDROID_JAR`, `D8`, `APKSIGNER`; `ECJ_JAR`, `D8_JAR`, `DX_JAR` and `APKSIGNER_JAR` are optional host-tool alternatives. Host tools are not shipped in the module. The companion uses Android framework APIs only.
+
+Host tests simulate owner/guest/profile flags, root denial, malformed records, wrong confirmation, command injection attempts, current-user failures, capacity responses, guest-quota failures, misleading exit codes, action launch, locks, disabled modules and install-signature failures. The companion model/quoting suite adds 19 JVM assertions. The ZIP packager checks required files, APK structure, archive integrity and executable modes; `apksigner` verifies the APK signature. **These are host-side checks, not a successful flash or real-device safety certification.**

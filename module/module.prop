@@ -1,0 +1,6 @@
+id=guestguard
+name=Guest Guard • Safe User Manager
+version=2.0.0
+versionCode=20000
+author=rehmaahmed11
+description=Native guest-management GUI and Magisk Action. Owner and non-guest deletion blocked. No property tweaks, boot patches, or unlimited-user claims. Open Guest Guard after reboot.
