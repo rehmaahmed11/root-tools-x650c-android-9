@@ -35,9 +35,9 @@ gradle :app:assembleDebug
 
 APK output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-## Root troubleshooting (1.0.1)
+## Root troubleshooting (1.0.2)
 
-Install the **newly built** APK (version 1.0.1 / code 2), not an older downloaded artifact.
+Install the **newly built** APK (version 1.0.2 / code 3), not an older downloaded artifact. This release uses an explicit `su -c` request so Android root managers receive a per-app access request, and shows an immediate in-app toast while waiting.
 Open Root Tools, allow its prompt in Magisk/SuperSU/your installed root manager,
 and wait for **ROOT READY**. The user list loads automatically. Return to the app
 or tap the root badge / Check root to reverify after changing root-manager settings.

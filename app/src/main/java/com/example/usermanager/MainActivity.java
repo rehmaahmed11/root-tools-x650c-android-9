@@ -70,6 +70,7 @@ public class MainActivity extends Activity {
         if (checkingRoot || isFinishing() || isDestroyed()) return;
         checkingRoot = true;
         rootReady = false;
+        Toast.makeText(this, "Requesting root access — approve Root Tools in your superuser prompt", Toast.LENGTH_LONG).show();
         if (showingUsers) renderUsers(); else renderHome();
         updateRootBadge("CHECKING ROOT", false, true);
         worker.execute(() -> {

@@ -24,7 +24,7 @@ public final class RootShellTest {
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("root-shell-test");
         try {
-            Path granted = fakeSu(dir, "granted", "id() { echo 0; }\neval \"$(cat)\"");
+            Path granted = fakeSu(dir, "granted", "id() { echo 0; }\n[ \"$1\" = '-c' ] && eval \"$2\"");
             RootShell shell = new RootShell(new String[]{granted.toString()});
             RootShell.Result result = shell.run("echo 'Success: created user id 10'", 3);
             check(result.rootVerified && result.exitCode == 0 && !result.timedOut

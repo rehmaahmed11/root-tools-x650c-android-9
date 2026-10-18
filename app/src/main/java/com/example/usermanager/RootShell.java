@@ -3,7 +3,6 @@ package com.example.usermanager;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
@@ -34,13 +33,24 @@ final class RootShell {
     }
 
     Result run(String command, int timeoutSeconds) {
+        String script = "export PATH=/system/bin:/system/xbin:/sbin:$PATH\n"
+                + "if [ \"$(id -u)\" != \"0\" ]; then echo 'Superuser shell did not provide UID 0'; exit 77; fi\n"
+                + "echo '" + VERIFIED + "'\n"
+                + "(\n" + command + "\n)\n"
+                + "result=$?\nexit \"$result\"\n";
+
         Process process = null;
         StringBuilder launchErrors = new StringBuilder();
         for (String candidate : candidates) {
             try {
-                // Interactive stdin works with both traditional su and Magisk/SuperSU.
-                // Only try another path if exec itself fails, never replay an operation.
-                process = new ProcessBuilder(candidate).redirectErrorStream(true).start();
+                // An explicit `su -c` request is the Android root-manager API used by
+                // Magisk, KernelSU, APatch and SuperSU.  In particular, this reliably
+                // causes the manager's per-app grant prompt, unlike opening su and
+                // waiting to feed an interactive stdin pipe on some Android 9 ROMs.
+                // Never try another candidate after a process starts: that could replay
+                // a privileged/destructive operation.
+                process = new ProcessBuilder(candidate, "-c", script)
+                        .redirectErrorStream(true).start();
                 break;
             } catch (IOException e) {
                 launchErrors.append(candidate).append(": ").append(e.getMessage()).append('\n');
@@ -69,13 +79,6 @@ final class RootShell {
         int exitCode = -1;
         String failure = "";
         try {
-            try (OutputStreamWriter writer = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8)) {
-                writer.write("export PATH=/system/bin:/system/xbin:/sbin:$PATH\n"
-                        + "if [ \"$(id -u)\" != \"0\" ]; then echo 'Superuser shell did not provide UID 0'; exit 77; fi\n"
-                        + "echo '" + VERIFIED + "'\n"
-                        + "(\n" + command + "\n)\n"
-                        + "result=$?\nexit \"$result\"\n");
-            }
             if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
                 timedOut = true;
                 process.destroyForcibly();
@@ -84,15 +87,8 @@ final class RootShell {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             failure = "Root request cancelled.";
-        } catch (IOException e) {
-            failure = "Superuser shell closed: " + e.getMessage();
-            try { reader.join(1000); } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
         } finally {
             process.destroyForcibly();
-            // su may reject access before stdin is written (broken pipe). Still
-            // collect its denial text rather than racing the output reader.
             try { reader.join(1000); } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
