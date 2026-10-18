@@ -1,5 +1,7 @@
-.gradle/
-**/build/
-local.properties
-.github-ci-logs/
+.tooling/
+.signing/
+build/
+dist/
+__pycache__/
 *.apk
+*.zip
